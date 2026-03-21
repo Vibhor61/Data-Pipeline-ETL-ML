@@ -1,0 +1,6 @@
+Data/
+ML/
+__pycache__/
+
+airflow.env
+pg.env
