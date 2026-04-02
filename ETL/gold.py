@@ -43,6 +43,9 @@ def build_gold_partition(conn, run_date: str) -> int:
     insert_sql = sql.SQL(
         """
         WITH silver AS (SELECT * FROM {silver} WHERE run_date <= %s),
+
+        dataset_start_date AS (SELECT MIN(run_date) from {silver}),
+
         silver_lags AS (
             SELECT *,
                 LAG(sales, 1) OVER (PARTITION BY item_id, store_id ORDER BY date) AS sales_lag_1,
@@ -50,19 +53,36 @@ def build_gold_partition(conn, run_date: str) -> int:
                 LAG(sales, 7) OVER (PARTITION BY item_id, store_id ORDER BY date) AS sales_lag_7,
                 LAG(sales, 14) OVER (PARTITION BY item_id, store_id ORDER BY date) AS sales_lag_14,
                 LAG(sales, 28) OVER (PARTITION BY item_id, store_id ORDER BY date) AS sales_lag_28
-            FROM silver
-        ),
-        silver_features AS (
-            SELECT
-                item_id, store_id, dept_id, cat_id, state_id, d, sales, sell_price, run_date, _processed_time, _pipeline_version,
-                sales_lag_1, sales_lag_3, sales_lag_7, sales_lag_14, sales_lag_28,
 
                 AVG(sales) OVER (PARTITION BY item_id, store_id ORDER BY date ROWS BETWEEN 7 PRECEDING AND 1 PRECEDING) AS sales_roll_mean_7,
                 AVG(sales) OVER (PARTITION BY item_id, store_id ORDER BY date ROWS BETWEEN 14 PRECEDING AND 1 PRECEDING) AS sales_roll_mean_14,
                 AVG(sales) OVER (PARTITION BY item_id, store_id ORDER BY date ROWS BETWEEN 28 PRECEDING AND 1 PRECEDING) AS sales_roll_mean_28,
                 STDDEV_SAMP(sales) OVER (PARTITION BY item_id, store_id ORDER BY date ROWS BETWEEN 7 PRECEDING AND 1 PRECEDING) AS sales_roll_std_7,
                 STDDEV_SAMP(sales) OVER (PARTITION BY item_id, store_id ORDER BY date ROWS BETWEEN 14 PRECEDING AND 1 PRECEDING) AS sales_roll_std_14,
-                STDDEV_SAMP(sales) OVER (PARTITION BY item_id, store_id ORDER BY date ROWS BETWEEN 28 PRECEDING AND 1 PRECEDING) AS sales_roll_std_28,
+                STDDEV_SAMP(sales) OVER (PARTITION BY item_id, store_id ORDER BY date ROWS BETWEEN 28 PRECEDING AND 1 PRECEDING) AS sales_roll_std_28,            
+            
+                CASE 
+                    WHEN date < (SELECT MIN(run_date) FROM dataset_start_date) + INTERVAL '28 days' 
+                    THEN TRUE ELSE FALSE 
+                END AS is_cold_start
+            FROM silver 
+        ),
+        silver_features AS (
+            SELECT
+                item_id, store_id, dept_id, cat_id, state_id, d, sales, sell_price, run_date, _processed_time, _pipeline_version,
+                
+                COALESCE(sales_lag_1,  sales_roll_mean_7, 0)  AS sales_lag_1,
+                COALESCE(sales_lag_3,  sales_roll_mean_7, 0)  AS sales_lag_3,
+                COALESCE(sales_lag_7,  sales_roll_mean_7, 0)  AS sales_lag_7,
+                COALESCE(sales_lag_14, sales_roll_mean_14, 0) AS sales_lag_14,
+                COALESCE(sales_lag_28, sales_roll_mean_28, 0) AS sales_lag_28,
+
+                COALESCE(sales_roll_mean_7, 0)  AS sales_roll_mean_7,
+                COALESCE(sales_roll_std_7, 0)   AS sales_roll_std_7,
+                COALESCE(sales_roll_mean_14, 0) AS sales_roll_mean_14,
+                COALESCE(sales_roll_std_14, 0)  AS sales_roll_std_14,
+                COALESCE(sales_roll_mean_28, 0) AS sales_roll_mean_28,
+                COALESCE(sales_roll_std_28, 0)  AS sales_roll_std_28,
                 
                 CASE WHEN wday IN (1, 7) THEN 1 ELSE 0 END AS is_weekend,
                 EXTRACT(QUARTER FROM date)::int AS quarter,
@@ -71,7 +91,8 @@ def build_gold_partition(conn, run_date: str) -> int:
                 COALESCE(snap_CA, 0) AS snap_CA, 
                 COALESCE(snap_TX, 0) AS snap_TX, 
                 COALESCE(snap_WI, 0) AS snap_WI,
-                wm_yr_wk
+                wm_yr_wk,
+                is_cold_start
             FROM silver_lags
         )
         INSERT INTO {gold} (
@@ -80,7 +101,7 @@ def build_gold_partition(conn, run_date: str) -> int:
             sales_roll_mean_7, sales_roll_std_7, sales_roll_mean_14, sales_roll_std_14, sales_roll_mean_28, sales_roll_std_28,
             is_weekend, quarter, month, wday, weekday, year, 
             event_name_1, event_type_1, event_name_2, event_type_2,
-            snap_CA, snap_TX, snap_WI, wm_yr_wk
+            snap_CA, snap_TX, snap_WI, wm_yr_wk, is_cold_start
         )
         SELECT
             item_id, store_id, dept_id, cat_id, state_id, d, sales, sell_price, run_date, _processed_time, _pipeline_version,
@@ -88,7 +109,7 @@ def build_gold_partition(conn, run_date: str) -> int:
             sales_roll_mean_7, sales_roll_std_7, sales_roll_mean_14, sales_roll_std_14, sales_roll_mean_28, sales_roll_std_28,
             is_weekend, quarter, month, wday, weekday, year, 
             event_name_1, event_type_1, event_name_2, event_type_2,
-            snap_CA, snap_TX, snap_WI, wm_yr_wk
+            snap_CA, snap_TX, snap_WI, wm_yr_wk, is_cold_start
         FROM silver_features
         WHERE run_date = %s;
         """

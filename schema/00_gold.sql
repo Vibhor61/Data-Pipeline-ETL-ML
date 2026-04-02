@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS gold_table (
     sales_roll_std_14  NUMERIC(10,4),
     sales_roll_std_28  NUMERIC(10,4),
 
+    is_cold_start      BOOLEAN NOT NULL DEFAULT FALSE,
     is_weekend         INTEGER,
     quarter            INTEGER,
     month              SMALLINT,

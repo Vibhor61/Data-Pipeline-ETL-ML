@@ -66,7 +66,12 @@ def create_or_get_run(
     return run_id
 
 
-def update_run_status(conn, run_id: int, status: str, error_message: Optional[str] = None):
+def update_run_status(
+    conn, 
+    run_id: int, 
+    status: str, 
+    error_message: Optional[str] = None
+):
     if status not in ("running", "success", "failed"):
         raise ValueError(f"Invalid status: {status}")
 
@@ -133,7 +138,12 @@ def update_run_rows(
 
 
 
-def start_step(conn, run_id: int, dag_id: str, step_name: str):
+def start_step(
+    conn, 
+    run_id: int, 
+    dag_id: str, 
+    step_name: str
+):
     sql_q = """
         INSERT INTO etl_pipeline_steps (run_id, dag_id, step_name, status)
         VALUES (%s, %s, %s, 'running')
