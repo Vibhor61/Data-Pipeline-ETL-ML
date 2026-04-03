@@ -74,6 +74,16 @@ services:
       - ./data:/opt/airflow/data
       - ./logs:/opt/airflow/logs
     command: scheduler
+  
+  # mlflow:
+  #   image: mlflow
+  #   container_name: mlflow_server
+  #   ports:
+  #     - "5000:5000"
+  #   volumes:
+  #     - ./mlflow/mlruns:/app/mlruns
+  #     - ./mlflow/mlflow.db:/app/mlflow.db
+  #   restart: unless-stopped
 
 volumes:
   postgres_data:
