@@ -15,7 +15,7 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from helpers import (
+from etl_helpers import (
     report_table_count,
     update_run_rows,
     update_run_status,

@@ -2,6 +2,8 @@ import pandera as pa
 from pandera import Column, Check
 import pandas as pd
 
+VALID_EVENT_TYPES = {"Sporting","Cultural","National","Religious", None}
+
 GoldTableSchema = pa.DataFrameSchema(
         columns={
                 "item_id": Column(pa.String, nullable=False),
@@ -62,7 +64,7 @@ GoldTableSchema = pa.DataFrameSchema(
 
         
         checks = [
-                pa.Check(lambda df: (df[["sales_lag_1","sales_lag_3","sales_lag_7","sales_lag_14","sales_lag_28"]] >= 0).all().all(),
+                pa.Check(lambda df: (df[["sales_lag_1","sales_lag_3","sales_lag_7","sales_lag_14","sales_lag_28"]] >= 0).values.all(),
                         error="Lag features contain negative values"),
 
                 # Uniqueness: each (item_id, store_id, d) combo should appear once
@@ -74,7 +76,7 @@ GoldTableSchema = pa.DataFrameSchema(
                         error="_processed_time is earlier than run_date"),
 
                 # sell_price > 0 when sales > 0
-                pa.Check(lambda df: (df[df["sales"] > 0]["sell_price"] > 0).all(),
+                pa.Check(lambda df: (df[df["sales"] > 0]["sell_price"].fillna(0) > 0).all(),
                         error="Items with positive sales have zero sell_price"),
 
                 pa.Check(lambda df: (df[["sales_roll_mean_7","sales_roll_mean_14","sales_roll_mean_28","sales_roll_std_7","sales_roll_std_14","sales_roll_std_28"]] >= 0).all().all(),
@@ -86,11 +88,10 @@ GoldTableSchema = pa.DataFrameSchema(
                 pa.Check(lambda df: df["run_date"].nunique() == 1,
                         error="Multiple run_dates in one batch partial merge detected"),
                 
-                VALID_EVENT_TYPES = {"Sporting","Cultural","National","Religious", None}
                 # M-5 Dataset Level Gaurantee
                 pa.Check(lambda df:
-                        df["event_type_1"].isin(VALID_EVENT_TYPES).all(),
-                        df["event_type_2"].isin(VALID_EVENT_TYPES).all(),
+                        (df["event_type_1"].isin(VALID_EVENT_TYPES).all(),
+                        df["event_type_2"].isin(VALID_EVENT_TYPES).all()),
                         error="Unknown event_type value M5 schema drift"),
 
                 pa.Check(
@@ -106,6 +107,7 @@ def validate_gold_data(df: pd.DataFrame):
     try:
         GoldTableSchema.validate(df, lazy=True)
         print("Gold Table Validation Passed!")
+        return df
     except pa.errors.SchemaErrors as err:
         print("Validation Failed!")
         print(err.failure_cases) 

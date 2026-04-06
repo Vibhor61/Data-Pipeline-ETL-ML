@@ -59,4 +59,4 @@ def load_data(cfg: DataLoader) -> pd.DataFrame:
             logger.error("Loaded dataset is empty. Check time window / filters.")
             raise ValueError("Loaded dataset is empty. Check time window / filters.")
         
-        return df
+    return df
