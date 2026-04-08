@@ -1,9 +1,8 @@
 import logging
 import os
 import argparse
-
-import psycopg2
 from psycopg2 import sql
+from utils.db import get_connection
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(
@@ -11,23 +10,11 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
 
-DB_CONFIG = {
-    "host": os.getenv("PGHOST", "postgres"),
-    "port": int(os.getenv("PGPORT", "5432")),
-    "database": os.getenv("PGDATABASE", "retail_dw"),
-    "user": os.getenv("PGUSER", "airflow"),
-    "password": os.getenv("PGPASSWORD", "airflow"),
-}
-
 BRONZE_TABLE = os.getenv("BRONZE_TABLE", "bronze_sales")
 SILVER_TABLE = os.getenv("SILVER_TABLE", "silver_table")
 CALENDAR_TABLE = os.getenv("CALENDAR_TABLE", "calendar")
 SELL_PRICES_TABLE = os.getenv("SELL_PRICES_TABLE", "sell_prices")
 PIPELINE_VERSION = os.getenv("PIPELINE_VERSION", "v1")
-
-
-def get_connection():
-    return psycopg2.connect(**DB_CONFIG)
 
 
 ALLOWED_TABLES = {"bronze_sales", "silver_table", "calendar", "sell_prices"}

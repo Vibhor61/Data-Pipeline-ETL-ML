@@ -5,10 +5,9 @@ from pathlib import Path
 import datetime
 
 import pandas as pd
-import psycopg2
 from psycopg2 import sql
 from psycopg2.extras import execute_values
-
+from utils.db import get_connection
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(
@@ -16,13 +15,6 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
 
-DB_CONFIG = {
-    "host": os.getenv("PGHOST", "postgres"),
-    "port": int(os.getenv("PGPORT", "5432")),
-    "database": os.getenv("PGDATABASE", "retail_dw"),
-    "user": os.getenv("PGUSER", "airflow"),
-    "password": os.getenv("PGPASSWORD", "airflow"),
-}
 
 SALES_CSV_PATH = Path(
     os.getenv("SALES_CSV_PATH", "/opt/airflow/data/raw/sales_train_validation.csv")
@@ -42,10 +34,6 @@ PIPELINE_VERSION = os.getenv("PIPELINE_VERSION", "v1")
 BASE_DATE = os.getenv("BASE_DATE","2011-01-29")
 
 ALLOWED_TABLES = {"bronze_sales", "calendar", "sell_prices"}
-
-
-def get_connection():
-    return psycopg2.connect(**DB_CONFIG)
 
 
 def validate_table_name(table_name: str) -> None:

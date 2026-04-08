@@ -1,25 +1,13 @@
 import numpy as np
 import pandas as pd
 import mlflow
-import os
-import psycopg2
+
 from sklearn.metrics import mean_squared_error, mean_absolute_error
 import logging
-from dags.ml_helpers import log_evaluation_metrics
+from utils.ml_helpers import log_evaluation_metrics
+from utils.db import get_connection
+
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
-
-
-DB_CONFIG = {
-    "host": os.getenv("PGHOST", "postgres"),
-    "port": int(os.getenv("PGPORT", "5432")),
-    "database": os.getenv("PGDATABASE", "retail_dw"),
-    "user": os.getenv("PGUSER", "airflow"),
-    "password": os.getenv("PGPASSWORD", "airflow"),
-}
-
-def get_connection():
-    return psycopg2.connect(**DB_CONFIG)
 
 def rmse(y_true, y_pred):
     return np.sqrt(mean_squared_error(y_true, y_pred))
@@ -48,12 +36,9 @@ def evaluate_pipeline(df: pd.DataFrame, run_id: str ,dataset_id: str):
     df["errors"] = y_true - y_pred
     df["abs_errors"] = np.abs(df["errors"])
 
-    error_mean = df["error"].mean()
-    error_std = df["error"].std()
+    error_mean = df["errors"].mean()
+    error_std = df["errors"].std()
 
-    
-
-    
     try:
         conn = get_connection()
         with conn.cursor() as cur:

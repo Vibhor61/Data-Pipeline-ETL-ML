@@ -10,7 +10,7 @@ import psycopg2
 import subprocess
 import os
 
-from ml_helpers import (
+from utils.ml_helpers import (
     create_or_get_ml_run,
     dataset_log,
     update_ml_run_status,

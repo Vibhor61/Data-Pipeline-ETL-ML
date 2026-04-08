@@ -10,6 +10,7 @@ CREATE TABLE IF NOT EXISTS ml_pipeline_runs(
     ended_at            TIMESTAMP
 )
 
+CREATE INDEX IF NOT EXISTS idx_ml_pipeline_runs ON ml_pipeline_runs(run_id)
 
 CREATE TABLE IF NOT EXISTS ml_dataset(
     dataset_id           TEXT PRIMARY KEY,
@@ -28,6 +29,7 @@ CREATE TABLE IF NOT EXISTS ml_dataset(
     created_at           TIMESTAMP
 );
 
+CREATE INDEX IF NOT EXISTS idx_ml_dataset ON ml_dataset(dataset_id)
 
 CREATE TABLE IF NOT EXISTS ml_runs(
     ml_run_id           TEXT PRIMARY KEY,
@@ -60,3 +62,4 @@ CREATE TABLE IF NOT EXISTS ml_runs(
         ON DELETE CASCADE
 )
 
+CREATE INDEX IF NOT EXISTS idx_ml_runs ON ml_runs(ml_run_id)

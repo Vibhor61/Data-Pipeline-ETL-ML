@@ -5,64 +5,21 @@ import numpy as np
 import pandas as pd
 import logging
 import joblib
-import psycopg2
 
 import mlflow
 import mlflow.lightgbm
 import mlflow.xgboost
 
-from typing import Dict
 from sklearn.preprocessing import LabelEncoder
-from sklearn.metrics import mean_squared_error
 
-from dags.ml_helpers import log_prediction_run
+from utils.ml_helpers import log_prediction_run
+from utils.db import get_connection
+from utils.features import CATEGORICAL_COLS, preprocess, transform
 
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
 
 TARGET_COL = "sales"
 DATE = ["run_date"]
-
-CATEGORICAL_COLS = [
-    "item_id",
-    "store_id",
-    "dept_id",
-    "cat_id",
-    "state_id",
-    "event_name_1",
-    "event_type_1",
-    "event_name_2",
-    "event_type_2"
-]
-
-DROP_COLS = [
-    "sales",
-    "run_date",
-    "d",
-    "_pipeline_version",
-    "_processed_time",
-    "weekday",
-    "is_cold_start"
-]
-
-DB_CONFIG = {
-    "host": os.getenv("PGHOST", "postgres"),
-    "port": int(os.getenv("PGPORT", "5432")),
-    "database": os.getenv("PGDATABASE", "retail_dw"),
-    "user": os.getenv("PGUSER", "airflow"),
-    "password": os.getenv("PGPASSWORD", "airflow"),
-}
-
-def get_connection():
-    return psycopg2.connect(**DB_CONFIG)
-
-
-def preprocess(df: pd.DataFrame):
-    for col in CATEGORICAL_COLS:
-        df[col] = df[col].fillna("None")
-
-    df = df.drop(columns=DROP_COLS, errors="ignore")
-    return df
 
 
 def fit_encoders(train):
@@ -74,24 +31,6 @@ def fit_encoders(train):
         encoders[col] = le
 
     return encoders
-
-
-def transform(df: pd.DataFrame, encoders: Dict[str, LabelEncoder]) -> pd.DataFrame:
-    df = df.copy()
-
-    for col, le in encoders.items():
-        df[col] = df[col].astype(str)
-
-        # handle unseen categories
-        mask = ~df[col].isin(le.classes_)
-        df.loc[mask, col] = "UNK"
-
-        if "UNK" not in le.classes_:
-            le.classes_ = np.append(le.classes_, "UNK")
-
-        df[col] = le.transform(df[col])
-
-    return df
 
 
 def load_artifacts(run_id: str):

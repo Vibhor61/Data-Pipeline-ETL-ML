@@ -1,23 +1,11 @@
-import os 
 import logging
-import psycopg2
 from psycopg2 import sql
 import pandas as pd
 from dataclasses import dataclass
 from typing import Optional
+from utils.db import get_connection
 
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
-
-
-DB_CONFIG = {
-    "host": os.getenv("PGHOST", "postgres"),
-    "port": int(os.getenv("PGPORT", "5432")),
-    "database": os.getenv("PGDATABASE", "retail_dw"),
-    "user": os.getenv("PGUSER", "airflow"),
-    "password": os.getenv("PGPASSWORD", "airflow"),
-}
-
 
 @dataclass
 class DataLoader:
@@ -26,10 +14,6 @@ class DataLoader:
     end_date: str
     date_column: str 
     run_id: Optional[str] = None # For snapshotting a specific run, if needed
-
-
-def get_connection():
-    return psycopg2.connect(**DB_CONFIG)
 
 
 def load_data(cfg: DataLoader) -> pd.DataFrame:
