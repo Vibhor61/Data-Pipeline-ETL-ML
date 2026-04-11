@@ -26,9 +26,9 @@ CREATE TABLE IF NOT EXISTS sell_prices (
     item_id            TEXT NOT NULL,
     wm_yr_wk           INTEGER NOT NULL,
     sell_price         NUMERIC(10,4) CHECK (sell_price IS NULL OR sell_price >= 0),
-    ingested_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    ingested_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
-    PRIMARY KEY (store_id, item_id, wm_yr_wk),
+    PRIMARY KEY (store_id, item_id, wm_yr_wk)
 );
 
 

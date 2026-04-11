@@ -1,211 +1,217 @@
 from airflow import DAG
 from airflow.operators.python import PythonOperator
-from airflow.utils.state import State
-from airflow.utils.trigger_rule import TriggerRule
-
-from datetime import datetime, timedelta
-import logging
+from datetime import datetime
 import uuid
-import psycopg2
-import subprocess
 import os
 
-from utils.ml_helpers import (
-    create_or_get_ml_run,
-    dataset_log,
-    update_ml_run_status,
-)
-
-logger = logging.getLogger(__name__)
-
-# -------------------------
-# CONFIG
-# -------------------------
-DB_CONFIG = {
-    "host": os.getenv("PGHOST", "postgres"),
-    "port": int(os.getenv("PGPORT", "5432")),
-    "database": os.getenv("PGDATABASE", "retail_dw"),
-    "user": os.getenv("PGUSER", "airflow"),
-    "password": os.getenv("PGPASSWORD", "airflow"),
-}
-
-DAG_ID = "retail_ml_dag"
-PIPELINE_NAME = "retail_ml_pipeline"
-
-GOLD_TABLE = "gold_table"
-PRED_TABLE = "predictions_table"
-
-# -------------------------
-# UTILS
-# -------------------------
-def get_connection():
-    return psycopg2.connect(**DB_CONFIG)
-
-def get_run_date(context):
-    return context["ds"]
-
-def get_run_id(context):
-    return context["ti"].xcom_pull(task_ids="init", key="run_id")
-
-# -------------------------
-# INIT
-# -------------------------
-def init_ml_run(**context):
-    conn = get_connection()
-    run_date = get_run_date(context)
-
-    run_id = f"ml_{run_date}_{uuid.uuid4().hex[:6]}"
-
-    try:
-        create_or_get_ml_run(
-            conn=conn,
-            run_id=run_id,
-            pipeline_name=PIPELINE_NAME,
-            run_date=run_date,
-        )
-
-        context["ti"].xcom_push(key="run_id", value=run_id)
-
-    finally:
-        conn.close()
-
-# -------------------------
-# GENERIC EXECUTOR
-# -------------------------
-def execute_ml_step(
-    step_name: str,
-    module: str,
-    dataset_type: str,
-    source_table: str,
-    **context
-):
-    conn = get_connection()
-    run_id = get_run_id(context)
-    run_date = get_run_date(context)
-
-    try:
-        # log dataset
-        dataset_id = dataset_log(
-            conn=conn,
-            run_id=run_id,
-            dataset_type=dataset_type,
-            source_table=source_table,
-            feature_query_hash="auto",
-            feature_version="v1",
-            row_count=0,
-            schema_hash="auto",
-        )
-
-        # execute script
-        cmd = [
-            "python", "-m", module,
-            "--run-date", run_date,
-            "--run-id", run_id,
-            "--dataset-id", dataset_id,
-        ]
-
-        logger.info("Running %s: %s", step_name, cmd)
-        subprocess.run(cmd, check=True)
-
-    finally:
-        conn.close()
-
-# -------------------------
-# TASK WRAPPERS
-# -------------------------
-def train_task(**context):
-    execute_ml_step(
-        step_name="train",
-        module="ML.train",
-        dataset_type="train",
-        source_table=GOLD_TABLE,
-        **context
-    )
-
-def predict_task(**context):
-    execute_ml_step(
-        step_name="predict",
-        module="ML.predict",
-        dataset_type="predict",
-        source_table=GOLD_TABLE,
-        **context
-    )
-
-def evaluate_task(**context):
-    execute_ml_step(
-        step_name="evaluate",
-        module="ML.evaluate",
-        dataset_type="evaluate",
-        source_table=PRED_TABLE,
-        **context
-    )
-
-# -------------------------
-# FINALIZE
-# -------------------------
-def finalize(**context):
-    conn = get_connection()
-
-    try:
-        run_id = get_run_id(context)
-        dag_run = context["dag_run"]
-
-        states = [
-            dag_run.get_task_instance("train").state,
-            dag_run.get_task_instance("predict").state,
-            dag_run.get_task_instance("evaluate").state,
-        ]
-
-        if all(s == State.SUCCESS for s in states):
-            update_ml_run_status(conn, run_id, "success")
-        else:
-            update_ml_run_status(conn, run_id, "failed")
-
-    finally:
-        conn.close()
-
-# -------------------------
-# DAG
-# -------------------------
 default_args = {
     "owner": "airflow",
     "retries": 2,
-    "retry_delay": timedelta(minutes=5),
 }
 
+BASE_PATH = "/opt/airflow/data"
+
+
+def task_create_run(**context):
+    from utils.db import get_connection
+    from utils.ml_helpers import create_or_get_ml_run
+
+    run_date = context["ds"]
+    run_id = f"ml_pipeline_{run_date}"
+
+    with get_connection() as conn:
+        create_or_get_ml_run(
+            conn=conn,
+            run_id=run_id,
+            pipeline_name="ml_pipeline",
+            triggered_by="airflow"
+        )
+
+    return {"run_id": run_id}
+
+
+def task_build_dataset(**context):
+    from data_loader import DataLoader, build_dataset
+    
+    ti = context["ti"]
+    prev = ti.xcom_pull(task_ids="create_run")
+
+    run_id = prev["run_id"]
+    run_date = context["ds"]
+
+    cfg = DataLoader(
+        pipeline_name="etl_pipeline",
+        run_date=run_date,
+        table_name="gold_table",
+        date_column="run_date",
+        feature_version="v1"
+    )
+
+    df, meta = build_dataset(cfg)
+
+    os.makedirs(BASE_PATH, exist_ok=True)
+    path = f"{BASE_PATH}/{meta['dataset_id']}.parquet"
+
+    if not os.path.exists(path):
+        df.to_parquet(path)
+
+    with get_connection() as conn:
+        write_ml_dataset(
+            conn=conn,
+            run_id=run_id,
+            cfg=cfg,
+            meta=meta
+        )
+    
+    return {
+        "run_id": run_id,
+        "dataset_id": meta["dataset_id"],
+        "data_path": path
+    }
+
+def task_train(**context):
+    import pandas as pd
+    from train import train_pipeline
+
+    ti = context["ti"]
+    meta = ti.xcom_pull(task_ids="build_dataset")
+
+    df = pd.read_parquet(meta["data_path"])
+
+    result = train_pipeline(
+        df=df,
+        run_id=meta["run_id"],
+        dataset_id=meta["dataset_id"]
+    )
+
+    # EXPECT train_pipeline RETURNS:
+    # {
+    #   "mlflow_run_id": ...,
+    #   "train_path": ...,
+    #   "val_path": ...,
+    #   "test_path": ...
+    # }
+
+    return {
+        "run_id": meta["run_id"],
+        "dataset_id": meta["dataset_id"],
+        **result
+    }
+
+
+# --------------------------
+# TASK 4: PREDICT
+# --------------------------
+
+def task_predict(**context):
+    import pandas as pd
+    from predict import predict_pipeline
+
+    ti = context["ti"]
+    meta = ti.xcom_pull(task_ids="train")
+
+    df_test = pd.read_parquet(meta["test_path"])
+
+    df_pred = predict_pipeline(
+        df=df_test,
+        mlflow_run_id=meta["mlflow_run_id"],
+        dataset_id=meta["dataset_id"]
+    )
+
+    # Persist predictions
+    pred_path = f"{BASE_PATH}/pred_{meta['dataset_id']}.parquet"
+
+    if not os.path.exists(pred_path):
+        df_pred.to_parquet(pred_path)
+
+    return {
+        "run_id": meta["run_id"],
+        "dataset_id": meta["dataset_id"],
+        "mlflow_run_id": meta["mlflow_run_id"],
+        "pred_path": pred_path
+    }
+
+
+# --------------------------
+# TASK 5: EVALUATE
+# --------------------------
+
+def task_evaluate(**context):
+    import pandas as pd
+    from evaluate import evaluate_pipeline
+
+    ti = context["ti"]
+    meta = ti.xcom_pull(task_ids="predict")
+
+    df_pred = pd.read_parquet(meta["pred_path"])
+
+    evaluate_pipeline(
+        df=df_pred,
+        mlflow_run_id=meta["mlflow_run_id"],
+        dataset_id=meta["dataset_id"]
+    )
+
+
+# --------------------------
+# TASK 6: FINALIZE
+# --------------------------
+
+def task_finalize(**context):
+    from utils.db import get_connection
+    from utils.ml_helpers import update_ml_run_status
+
+    ti = context["ti"]
+    meta = ti.xcom_pull(task_ids="train")
+
+    with get_connection() as conn:
+        update_ml_run_status(
+            conn=conn,
+            run_id=meta["run_id"],
+            status="success"
+        )
+
+
+# --------------------------
+# DAG
+# --------------------------
+
 with DAG(
-    dag_id=DAG_ID,
-    default_args=default_args,
-    start_date=datetime(2011, 1, 29),
+    dag_id="ml_pipeline_final",
+    start_date=datetime(2024, 1, 1),
     schedule_interval="@daily",
     catchup=False,
-    max_active_runs=1,
+    default_args=default_args,
 ) as dag:
 
-    init = PythonOperator(
-        task_id="init",
-        python_callable=init_ml_run,
+    create_run = PythonOperator(
+        task_id="create_run",
+        python_callable=task_create_run,
+    )
+
+    build_dataset = PythonOperator(
+        task_id="build_dataset",
+        python_callable=task_build_dataset,
     )
 
     train = PythonOperator(
         task_id="train",
-        python_callable=train_task,
+        python_callable=task_train,
     )
 
     predict = PythonOperator(
         task_id="predict",
-        python_callable=predict_task,
+        python_callable=task_predict,
     )
 
     evaluate = PythonOperator(
         task_id="evaluate",
-        python_callable=evaluate_task,
+        python_callable=task_evaluate,
     )
 
-    finalize_task = PythonOperator(
+    finalize = PythonOperator(
         task_id="finalize",
-        python_callable=finalize,
-        trigger_rule=TriggerRule.ALL_DONE,
+        python_callable=task_finalize,
     )
 
-    init >> train >> predict >> evaluate >> finalize_task
+    # Dependencies
+    create_run >> build_dataset >> train >> predict >> evaluate >> finalize

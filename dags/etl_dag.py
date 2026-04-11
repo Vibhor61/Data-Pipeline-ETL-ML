@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 import psycopg2
 import subprocess
+from utils.db import get_connection
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
@@ -24,17 +25,7 @@ from utils.etl_helpers import (
     finish_step
 )
 
-import ETL.bronze, ETL.silver, ETL.gold
-
 logger = logging.getLogger(__name__)
-
-DB_CONFIG = {
-    "host": os.getenv("PGHOST", "postgres"),
-    "port": int(os.getenv("PGPORT", "5432")),
-    "database": os.getenv("PGDATABASE", "retail_dw"),
-    "user": os.getenv("PGUSER", "airflow"),
-    "password": os.getenv("PGPASSWORD", "airflow"),
-}
 
 DAG_ID = "retail_etl_dag"
 PIPELINE_NAME = "retail_pipeline"
@@ -43,8 +34,6 @@ BRONZE_TABLE = os.getenv("BRONZE_TABLE", "bronze_sales")
 SILVER_TABLE = os.getenv("SILVER_TABLE", "silver_table")
 GOLD_TABLE = os.getenv("GOLD_TABLE", "gold_table")
 
-def get_connection():
-    return psycopg2.connect(**DB_CONFIG)
 
 def get_run_date(context):
     return context["ds"]

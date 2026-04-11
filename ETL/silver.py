@@ -2,7 +2,9 @@ import logging
 import os
 import argparse
 from psycopg2 import sql
+import pandas as pd
 from utils.db import get_connection
+from silver_validation import SilverSchema
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(
@@ -120,7 +122,21 @@ def build_silver_partition(conn, run_date: str) -> int:
 
         if inserted == 0:
             raise ValueError(f"Silver partition is empty for run_date={run_date}")
+        
+        cur.execute(
+            sql.SQL("SELECT * FROM {} WHERE run_date = %s").format(silver_ident),
+            (run_date,)
+        )
 
+        cols = [desc[0] for desc in cur.description]
+        rows = cur.fetchall()
+
+        df = pd.DataFrame(rows, columns=cols)
+
+        logger.info("Validating silver schema for run_date=%s", run_date)
+        SilverSchema.validate(df)
+        logger.info("Validation passed for run_date=%s", run_date)
+        
     logger.info("Built silver partition for run_date=%s with %s rows", run_date, inserted)
     return inserted
 

@@ -4,14 +4,11 @@ import tempfile
 import numpy as np
 import pandas as pd
 import logging
-import hashlib
 import mlflow
 import mlflow.lightgbm
 import mlflow.xgboost
 import joblib
-import argparse
 
-from typing import Dict
 from sklearn.preprocessing import LabelEncoder
 from sklearn.metrics import mean_squared_error
 
@@ -20,37 +17,32 @@ import xgboost as xgb
 
 from utils.ml_helpers import log_training_run
 from utils.db import get_connection
-from utils.features import CATEGORICAL_COLS, DROP_COLS, preprocess, transform
-from data_loader import DataLoader, load_data
-from validate import validate_data
+from preprocess import CATEGORICAL_COLS, preprocess, transform
+from validate import GoldMLSchema
 
 logger = logging.getLogger(__name__)
 
 TARGET_COL = "sales"
 DATE = ["run_date"]
 
-def split_data(df:pd.DataFrame, end_date: str):
+
+def rmse(y_true, y_pred):
+    return np.sqrt(mean_squared_error(y_true, y_pred))
+
+
+def split_data(df:pd.DataFrame, meta: dict):
+
     df = df.sort_values("run_date")
+    end_date = pd.to_datetime(meta["time_end"])
 
-    end_date = pd.to_datetime(end_date) 
-    start_date = end_date - pd.Timedelta(days=1000)
-    validation_start_date = end_date - pd.Timedelta(days=200)
-    test_start_date = end_date - pd.Timedelta(days=100)
-    
-    train_data = df[(df["run_date"] >= start_date) & (df["run_date"] < validation_start_date)]
-    validation_data = df[(df["run_date"] >= validation_start_date) & (df["run_date"] < test_start_date)]
-    test_data = df[(df["run_date"] >= test_start_date) & (df["run_date"] <= end_date)]
+    val_start  = end_date - pd.Timedelta(days=200)
+    test_start = end_date - pd.Timedelta(days=100)
 
-    return train_data, validation_data, test_data
+    train = df[df["run_date"] < val_start]
+    val   = df[(df["run_date"] >= val_start) & (df["run_date"] < test_start)]
+    test  = df[df["run_date"] >= test_start]
 
-
-def generate_feature_hash(df: pd.DataFrame, features:list):
-    payload = {
-        "features": sorted(features),
-        "dtypes": {col: str(df[col].dtype) for col in features}
-    }
-    payload_str = json.dumps(payload, sort_keys=True)
-    return hashlib.md5(payload_str.encode()).hexdigest()
+    return train, val, test
 
 
 def fit_encoders(train):
@@ -58,13 +50,13 @@ def fit_encoders(train):
     for col in CATEGORICAL_COLS:
         le = LabelEncoder()
         train[col] = train[col].astype(str)
-        le.fit(train[col])
+        le.fit(train[col].unique().tolist() + ["UNK"])
         encoders[col] = le
 
     return encoders
 
 
-def baseline_train(df:pd.DataFrame , end_date:str):
+def baseline_train(df:pd.DataFrame):
     return df["sales_lag_7"]
 
 
@@ -104,10 +96,6 @@ def lgbm_train(X_train, y_train, X_val, y_val):
     return model, params
 
 
-def rmse(y_true, y_pred):
-    return np.sqrt(mean_squared_error(y_true, y_pred))
-
-
 def xg_boost_train(X_train, y_train, X_val, y_val):
     params = {
         "n_estimators":1000,
@@ -129,48 +117,24 @@ def xg_boost_train(X_train, y_train, X_val, y_val):
     )
 
     return model, params
+ 
 
-
-def parse_args():
-    parser = argparse.ArgumentParser()
-
-    parser.add_argument("--run-date", required=True)
-    parser.add_argument("--run-id", required=True)
-    parser.add_argument("--dataset-id", required=True)
-
-    return parser.parse_args()
-
-
-def train_pipeline(end_date: str, run_id: str, dataset_id:str):
+def train_pipeline(df: pd.DataFrame, run_id: str, dataset_id:str, meta: dict):
 
     logger.info("Starting pipeline run")
     mlflow.set_tracking_uri("http://mlflow:5000")  # or localhost if outside docker
     mlflow.set_experiment("retail_demand_forecasting")
-    
-    args = parse_args()
-    end_date = args.run_date
-    end_date = pd.to_datetime(end_date)
 
-    start_date = end_date - pd.Timedelta(days=1000)
-
-    load_data_cfg = DataLoader(
-        table_name="gold_table",
-        start_date=str(start_date.date()),
-        end_date=str(end_date.date()),
-        date_column="run_date",
-        run_id=None
-    )
-
-    df = load_data(load_data_cfg)
-    validate_data(df)
-
-    with mlflow.start_run(run_name=f"run_{end_date}") as run:
+    with mlflow.start_run(run_name=f"run_{run_id}") as run:
         mlflow_run_id = run.info.run_id
 
         df = df.copy()
         df = preprocess(df)
 
-        train, val, test = split_data(df, end_date)
+        train, val, test = split_data(df, meta)
+        for d in [train, val, test]:
+            if "run_date" in d.columns:
+                d.drop(columns=["run_date"], inplace=True)
 
         encoders = fit_encoders(train)
         
@@ -178,12 +142,19 @@ def train_pipeline(end_date: str, run_id: str, dataset_id:str):
         val   = transform(val, encoders)
         test  = transform(test, encoders)
 
-        FEATURES = [col for col in df.columns if col != TARGET_COL]
-        feature_hash = generate_feature_hash(df, FEATURES)
+        # FEATURES = [col for col in df.columns if col != TARGET_COL] Feature leakage if run_date and identifiers not dropped
+        FEATURES = [col for col in train.columns if col not in TARGET_COL]
 
-        mlflow.log_params("end_date", end_date)
-        mlflow.log_param("feature_query_hash", feature_hash)
+        mlflow.log_param("run_id", run_id)
+        mlflow.log_param("dataset_id", dataset_id)
+        mlflow.log_param("feature_version", meta["feature_version"])
+        mlflow.log_param("time_start", meta["time_start"])
+        mlflow.log_param("time_end", meta["time_end"])
+
         mlflow.log_param("num_features", len(FEATURES))
+        mlflow.log_param("train_rows", len(train))
+        mlflow.log_param("val_rows", len(val))
+        mlflow.log_param("test_rows", len(test))
         
         X_train, y_train = train[FEATURES], train[TARGET_COL]
         X_val, y_val     = val[FEATURES], val[TARGET_COL]
@@ -210,7 +181,6 @@ def train_pipeline(end_date: str, run_id: str, dataset_id:str):
         mlflow.log_params({f"xgb_{k}": v for k, v in xgb_params.items()})
 
         metrics = {
-            "baseline": baseline_val_rmse,
             "lgb": lgb_val_rmse,
             "xgb": xgb_val_rmse
         }
@@ -223,12 +193,10 @@ def train_pipeline(end_date: str, run_id: str, dataset_id:str):
             test_pred = lgb_model.predict(X_test)
             mlflow.lightgbm.log_model(best_model, "best_model")
 
-        elif best_model_name == "xgb":
+        else:
             best_model = xgb_model
             test_pred = xgb_model.predict(X_test)
             mlflow.xgboost.log_model(best_model, "best_model")
-        else:
-            test_pred = baseline_train(test)
 
         test_rmse = rmse(y_test, test_pred)
         mlflow.log_metric("test_rmse", test_rmse)
@@ -252,19 +220,24 @@ def train_pipeline(end_date: str, run_id: str, dataset_id:str):
             test_rmse
         )
 
-        conn = get_connection()
-
+        conn = None 
         try: 
-            model_version = f"{best_model_name}_{run_id}"
-
+            conn = get_connection()
             log_training_run(
-                    conn=conn,
-                    run_id=run_id,
-                    dataset_id=dataset_id,
-                    model_name=best_model_name,
-                    model_version=model_version,
-                    mlflow_run_id=mlflow_run_id,
-                )
-
+                conn=conn,
+                run_id=run_id,
+                dataset_id=dataset_id,
+                model_name=best_model_name,
+                model_version=f"{best_model_name}_{run_id}",
+                mlflow_run_id=mlflow_run_id,
+            )  
         finally:
-            conn.close()
+            if conn:
+                conn.close()
+
+
+def main(run_id: str, dataset_id: str, df: pd.DataFrame, meta: dict):
+    logger.info("Main entry: run_id=%s dataset_id=%s", run_id, dataset_id)
+    
+    GoldMLSchema.validate(df, lazy=True)
+    train_pipeline(df, run_id, dataset_id, meta)

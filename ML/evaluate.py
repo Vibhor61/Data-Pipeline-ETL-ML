@@ -20,11 +20,25 @@ def mape(y_true, y_pred):
 def wmape(y_true, y_pred):
     return np.sum(np.abs(y_true - y_pred)) / (np.sum(np.abs(y_true)) + 1e-8)
 
+# Slice key harcoded in version1
+def evaluate_pipeline(df: pd.DataFrame, mlflow_run_id: str ,dataset_id: str):
 
-def evaluate_pipeline(df: pd.DataFrame, run_id: str ,dataset_id: str):
-
+    logger.info("Prediction pipeline started for mlflow_run_id=%s and dataset_id=%s", mlflow_run_id, dataset_id)
     mlflow.set_tracking_uri("http://mlflow:5000")
 
+    # Silent failure if trained on some dataset but evaluating on other without checking
+    run = mlflow.get_run(mlflow_run_id)
+    trained_dataset_id = run.data.params.get("dataset_id")
+
+    if trained_dataset_id != dataset_id:
+        raise ValueError(
+            f"Dataset mismatch: model trained on {trained_dataset_id}, "
+            f"but evaluation requested on {dataset_id}"
+        )
+    
+    if "sales" not in df.columns or "prediction" not in df.columns:
+        raise ValueError("Missing required columns: sales/prediction")
+    
     y_true = df["sales"]
     y_pred = df["prediction"]
 
@@ -39,31 +53,14 @@ def evaluate_pipeline(df: pd.DataFrame, run_id: str ,dataset_id: str):
     error_mean = df["errors"].mean()
     error_std = df["errors"].std()
 
-    try:
-        conn = get_connection()
-        with conn.cursor() as cur:
-            cur.execute("""
-                SELECT model_version FROM ml_runs WHERE run_id = %s and stage = 'train'
-                ORDERED BY created_at DESC
-                LIMIT 1;
-            """, (run_id,))
-
-        result = cur.fetchone()
-        if result is None:
-            raise ValueError(f"No model found for run_id={run_id}")
-        model_version = result[0]
-
-    finally:
-        conn.close()
-
-    
+    conn = None
     try:
         conn = get_connection()
         log_evaluation_metrics(
             conn=conn,
-            run_id=run_id,
+            run_id=None,  
             dataset_id=dataset_id,
-            model_version=model_version,
+            model_version=mlflow_run_id,
             metrics={
                 "rmse": test_rmse,
                 "mae": test_mae,
@@ -73,9 +70,11 @@ def evaluate_pipeline(df: pd.DataFrame, run_id: str ,dataset_id: str):
                 "error_std": error_std,
             },
             slice_key="overall",
-        )
+        )    
+        
     finally:
-        conn.close()
+        if conn:
+            conn.close()
 
     store_rmse = df.groupby("store_id").apply(
         lambda x: rmse(x["sales"], x["prediction"])
@@ -91,7 +90,7 @@ def evaluate_pipeline(df: pd.DataFrame, run_id: str ,dataset_id: str):
     worst_depts = dept_rmse.sort_values(ascending=False).head(5)
     best_depts = dept_rmse.sort_values(ascending=True).head(5)
 
-    with mlflow.start_run(run_id=run_id):
+    with mlflow.start_run(run_id=mlflow_run_id):
 
         mlflow.log_metric("test_rmse", test_rmse)
         mlflow.log_metric("test_mae", test_mae)
@@ -106,3 +105,5 @@ def evaluate_pipeline(df: pd.DataFrame, run_id: str ,dataset_id: str):
 
         mlflow.log_param("worst_depts", ",".join(map(str, worst_depts.index)))
         mlflow.log_param("best_depts", ",".join(map(str, best_depts.index)))
+    
+    logger.info("Evaluation completed")

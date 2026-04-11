@@ -86,8 +86,12 @@ def extract_bronze_partition(run_date: str, d_col: str, sales_csv_path: Path) ->
         ]
     ].copy()
 
-    sales_df["sales"] = sales_df["sales"].fillna(0).astype(int)
-
+    # Safe parsing and no deduplication
+    sales_df["sales"] = pd.to_numeric(sales_df["sales"], errors="coerce").fillna(0).astype(int)
+    sales_df = sales_df.drop_duplicates(
+        subset=["item_id", "store_id", "d", "run_date"]
+    )
+    
     logger.info(
         "Prepared bronze partition for run_date=%s with %s rows", run_date,len(sales_df),
     )

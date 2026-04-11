@@ -1,8 +1,9 @@
 CREATE TABLE IF NOT EXISTS ml_pipeline_runs(
     run_id              TEXT PRIMARY KEY,
-    run_date            DATE NOT NULL,
     pipeline_name       TEXT,
 
+    dag_hash            TEXT,
+    pipeline_config_hash TEXT,
     status              TEXT,
     triggered_by        TEXT,
 
@@ -15,13 +16,15 @@ CREATE INDEX IF NOT EXISTS idx_ml_pipeline_runs ON ml_pipeline_runs(run_id)
 CREATE TABLE IF NOT EXISTS ml_dataset(
     dataset_id           TEXT PRIMARY KEY,
     run_id               TEXT,
-    run_date             DATE,
     
     dataset_type         TEXT,
+    source_table         TEXT,
 
-    source_table         TEXT,     
-    feature_query_hash   TEXT,     
-    feature_version      TEXT,    
+    time_start           DATE,
+    time_end             DATE,
+
+    feature_version      TEXT, 
+    feature_hash         TEXT,   
 
     row_count            INT,
     schema_hash          TEXT,
@@ -48,7 +51,6 @@ CREATE TABLE IF NOT EXISTS ml_runs(
     slice_value         TEXT,
 
     prediction_count    INT,
-
     created_at          TIMESTAMP,
 
     CONSTRAINT fk_pipeline_run
@@ -60,6 +62,8 @@ CREATE TABLE IF NOT EXISTS ml_runs(
         FOREIGN KEY (dataset_id)
         REFERENCES ml_dataset(dataset_id)
         ON DELETE CASCADE
+
+    CONSTRAINT unique_stage_runs UNIQUE (run_id, dataset_id, stage)
 )
 
 CREATE INDEX IF NOT EXISTS idx_ml_runs ON ml_runs(ml_run_id)
