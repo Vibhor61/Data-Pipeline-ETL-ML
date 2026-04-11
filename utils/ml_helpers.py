@@ -5,35 +5,46 @@ from ML.data_loader import DataLoader
 logger = logging.getLogger(__name__)
 
 
-def create_or_get_ml_run(
+import logging
+import uuid
+
+logger = logging.getLogger(__name__)
+
+
+def create_or_get_ml_pipeline_run(
     conn,
     run_id: str,
     pipeline_name: str,
-    run_date: str,
-    triggered_by: str = "scheduler",
+    triggered_by: str = "airflow",
 ):
-    sql = """
-    INSERT INTO ml_pipeline_runs run_id, pipeline_name, status, triggered_by,created_at 
+    query = """
+    INSERT INTO ml_pipeline_runs (
+        run_id,
+        pipeline_name,
+        status,
+        triggered_by,
+        created_at
+    )
     VALUES (%s, %s, 'running', %s, NOW())
     ON CONFLICT (run_id)
     DO UPDATE SET
         status = 'running',
-        triggered_by = EXCLUDED.triggered_by,
-        ended_at = NULL;
+        triggered_by = EXCLUDED.triggered_by;
     """
+
     with conn.cursor() as cur:
-        cur.execute(sql, (run_id, run_date, pipeline_name, triggered_by))
+        cur.execute(query, (run_id, pipeline_name, triggered_by))
 
     conn.commit()
-    logger.info("ML pipeline run initialized: run_id=%s", run_id)
+    logger.info("Pipeline run created: %s", run_id)
 
 
-def write_ml_dataset(
-    conn, 
-    cfg: DataLoader, 
-    meta: dict
-):
-    query = """
+from datetime import datetime
+from psycopg2 import sql
+
+
+def log_dataset(conn, run_id: str, meta: dict):
+    query = sql.SQL("""
         INSERT INTO ml_dataset (
             dataset_id,
             run_id,
@@ -47,23 +58,40 @@ def write_ml_dataset(
             schema_hash,
             created_at
         )
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW())
-    """
+        VALUES (
+            %(dataset_id)s,
+            %(run_id)s,
+            %(dataset_type)s,
+            %(source_table)s,
+            %(time_start)s,
+            %(time_end)s,
+            %(feature_version)s,
+            %(feature_hash)s,
+            %(row_count)s,
+            %(schema_hash)s,
+            %(created_at)s
+        )
+        ON CONFLICT (dataset_id) DO NOTHING
+    """)
 
-    params = [
-        meta["dataset_id"],
-        meta["etl_run_id"],
-        "training",
-        cfg.table_name,
-        cfg.start_date,
-        cfg.end_date,
-        cfg.feature_version,
-        meta["feature_hash"],
-        meta["row_count"],
-        meta["schema_hash"]
-    ]
+    payload = {
+        "dataset_id": meta["dataset_id"],
+        "run_id": run_id,
+        "dataset_type": meta["dataset_type"],
+        "source_table": meta["source_table"],
+        "time_start": meta["time_start"],
+        "time_end": meta["time_end"],
+        "feature_version": meta["feature_version"],
+        "feature_hash": meta["feature_hash"],
+        "row_count": meta["row_count"],
+        "schema_hash": meta["schema_hash"],
+        "created_at": datetime.utcnow()
+    }
 
-    conn.execute(query, params)
+    with conn.cursor() as cur:
+        cur.execute(query, payload)
+
+    conn.commit()
 
 
 def log_training_run(
@@ -71,13 +99,12 @@ def log_training_run(
     run_id: str,
     dataset_id: str,
     model_name: str,
-    mlflow_run_id: str,
+    mlflow_run_id: str
 ):
-    ml_run_id = str(uuid.uuid4())
-
+    
     query = """
         INSERT INTO ml_runs (
-           ml_run_id,
+            ml_run_id,
             run_id,
             dataset_id,
             stage,
@@ -87,7 +114,7 @@ def log_training_run(
         )
         VALUES (%s, %s, %s, 'train', %s, %s, NOW());
     """
-
+    ml_run_id = f"{run_id}_train"
     with conn.cursor() as cur:
         cur.execute(
             query,
@@ -103,9 +130,9 @@ def log_prediction_run(
     run_id: str,
     dataset_id: str,
     mlflow_run_id: str,
-    prediction_count: int,
+    model_name: str,
+    prediction_count: int
 ):
-    ml_run_id = str(uuid.uuid4())
 
     query = """
         INSERT INTO ml_runs (
@@ -113,47 +140,39 @@ def log_prediction_run(
             run_id,
             dataset_id,
             stage,
+            model_name,
             mlflow_run_id,
             prediction_count,
             created_at
         )
-        VALUES (%s, %s, %s, 'predict', %s, %s, NOW());
+        VALUES (%s, %s, %s, 'predict', %s, %s, %s, NOW());
     """
+
+    ml_run_id = f"{mlflow_run_id}_predict"
 
     with conn.cursor() as cur:
         cur.execute(
             query,
-            (ml_run_id, run_id, dataset_id, mlflow_run_id, prediction_count),
+            (
+                ml_run_id,
+                run_id,
+                dataset_id,
+                model_name,
+                mlflow_run_id,
+                prediction_count
+            ),
         )
 
     conn.commit()
-    logger.info("Prediction logged: mlflow_run_id=%s and rows=%s", mlflow_run_id, prediction_count)
 
-
-def log_evaluation_metrics(
+def log_evaluation_run(
     conn,
     run_id: str,
     dataset_id: str,
     mlflow_run_id: str,
-    metrics: Dict[str, float],
-    slice_key: str = "overall",
-    slice_value: Optional[str] = None,
+    metrics: dict,
+    slice_key: str = "overall"
 ):
-    rows = []
-    for metric_name, metric_value in metrics.items():
-        rows.append(
-            (
-                str(uuid.uuid4()),
-                run_id,
-                dataset_id,
-                "evaluate",
-                mlflow_run_id,
-                metric_name,
-                metric_value,
-                slice_key,
-                slice_value,
-            )
-        )
 
     query = """
         INSERT INTO ml_runs (
@@ -165,19 +184,27 @@ def log_evaluation_metrics(
             metric_name,
             metric_value,
             slice_key,
-            slice_value,
             created_at
         )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW());
+        VALUES (%s, %s, %s, 'evaluate', %s, %s, %s, %s, NOW());
     """
 
     with conn.cursor() as cur:
-        cur.executemany(query, rows)
+        for k, v in metrics.items():
+            cur.execute(
+                query,
+                (
+                    f"{run_id}_eval_{k}",
+                    run_id,
+                    dataset_id,
+                    mlflow_run_id,
+                    k,
+                    float(v),
+                    slice_key
+                ),
+            )
 
     conn.commit()
-    logger.info(
-        "Evaluation metrics logged: mlflow_run_id=%s slice=%s", mlflow_run_id, slice_key,
-    )
 
 
 def update_ml_run_status(

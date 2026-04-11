@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Dict, Tuple, Any
 from utils.db import get_connection
 import json
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -44,8 +45,9 @@ def fetch_etl_run(conn, pipeline_name: str, run_date: str):
 
 
 def load_gold_dataset(conn, cfg: DataLoader, start_date, end_date) -> pd.DataFrame:
-    query = sql.SQL("""SELECT * FROM {table} WHERE run_date = %s
-        AND {date_col} BETWEEN %s AND %s
+    query = sql.SQL("""
+        SELECT * FROM {table} WHERE 
+        {date_col} BETWEEN %s AND %s
     """).format(
         table=sql.Identifier(cfg.table_name),
         date_col=sql.Identifier(cfg.date_column)
@@ -94,18 +96,18 @@ def build_dataset(cfg: DataLoader) -> Tuple[pd.DataFrame, Dict[str, Any]]:
         dataset_id = compute_hash({
             "pipeline_name": cfg.pipeline_name,
             "run_date": cfg.run_date,
-            "start_date": cfg.start_date,
-            "end_date": cfg.end_date,
             "schema_hash": schema_hash,
             "feature_hash": feature_hash,
             "row_count": len(df)
         })
 
+        dataset_path = os.path.join("/opt/airflow/data",f"{dataset_id}.parquet")
+
         metadata = {
             "dataset_id": dataset_id,
+            "dataset_path": dataset_path,
             "pipeline_name": cfg.pipeline_name,
             "run_date": cfg.run_date,
-            "etl_run_id": etl_row["run_id"],
             "row_count": len(df),
 
             "time_start": str(start_date.date()),
@@ -114,6 +116,7 @@ def build_dataset(cfg: DataLoader) -> Tuple[pd.DataFrame, Dict[str, Any]]:
             "schema_hash": schema_hash,
             "feature_hash": feature_hash,
             "feature_version": cfg.feature_version,
+            "source_table": cfg.table_name
         }
 
         return df, metadata

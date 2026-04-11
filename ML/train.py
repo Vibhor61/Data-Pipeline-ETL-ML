@@ -121,7 +121,7 @@ def xg_boost_train(X_train, y_train, X_val, y_val):
 
 def train_pipeline(df: pd.DataFrame, run_id: str, dataset_id:str, meta: dict):
 
-    logger.info("Starting pipeline run")
+    logger.info("Starting pipeline run for run_id=%s dataset_id=%s", run_id, dataset_id)
     mlflow.set_tracking_uri("http://mlflow:5000")  # or localhost if outside docker
     mlflow.set_experiment("retail_demand_forecasting")
 
@@ -143,9 +143,10 @@ def train_pipeline(df: pd.DataFrame, run_id: str, dataset_id:str, meta: dict):
         test  = transform(test, encoders)
 
         # FEATURES = [col for col in df.columns if col != TARGET_COL] Feature leakage if run_date and identifiers not dropped
-        FEATURES = [col for col in train.columns if col not in TARGET_COL]
+        FEATURES = [col for col in train.columns if col != TARGET_COL]
 
-        mlflow.log_param("run_id", run_id)
+        mlflow.log_param("mlflow_run_id", mlflow_run_id)
+        mlflow.log_param("airflow_run_id", run_id)
         mlflow.log_param("dataset_id", dataset_id)
         mlflow.log_param("feature_version", meta["feature_version"])
         mlflow.log_param("time_start", meta["time_start"])
@@ -214,10 +215,10 @@ def train_pipeline(df: pd.DataFrame, run_id: str, dataset_id:str, meta: dict):
             mlflow.log_artifact(feat_path)
 
         logger.info(
-            "Training pipeline completed successfully for run_id=%s best_model=%s rmse=%.4f",
+            "Training completed run_id=%s dataset_id=%s mlflow_run_id=%s",
             run_id,
-            best_model_name,
-            test_rmse
+            dataset_id,
+            mlflow_run_id
         )
 
         conn = None 
@@ -228,7 +229,6 @@ def train_pipeline(df: pd.DataFrame, run_id: str, dataset_id:str, meta: dict):
                 run_id=run_id,
                 dataset_id=dataset_id,
                 model_name=best_model_name,
-                model_version=f"{best_model_name}_{run_id}",
                 mlflow_run_id=mlflow_run_id,
             )  
         finally:
@@ -236,8 +236,8 @@ def train_pipeline(df: pd.DataFrame, run_id: str, dataset_id:str, meta: dict):
                 conn.close()
 
 
-def main(run_id: str, dataset_id: str, df: pd.DataFrame, meta: dict):
+def main(run_id: str, dataset_id: str, dataset_path: str, meta: dict):
     logger.info("Main entry: run_id=%s dataset_id=%s", run_id, dataset_id)
-    
+    df = pd.read_parquet(dataset_path)
     GoldMLSchema.validate(df, lazy=True)
     train_pipeline(df, run_id, dataset_id, meta)

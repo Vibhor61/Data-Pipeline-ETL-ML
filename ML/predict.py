@@ -23,7 +23,6 @@ DATE = ["run_date"]
 
 
 def load_artifacts(mlflow_run_id: str):
-    """Load encoders and features from MLflow artifacts."""
     client = mlflow.tracking.MlflowClient()
     
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -38,8 +37,7 @@ def load_artifacts(mlflow_run_id: str):
     return encoders, features
 
 
-def load_best_model(run_id: str, best_model: str):
-
+def load_model(run_id: str, best_model: str):
     if best_model == "lgb":
         model_uri = f"runs:/{run_id}/lgb_model"
         return mlflow.lightgbm.load_model(model_uri)
@@ -50,11 +48,30 @@ def load_best_model(run_id: str, best_model: str):
         return None
     
 
-def predict_pipeline(df: pd.DataFrame, mlflow_run_id: str, dataset_id: str):
+def predict_pipeline(df: pd.DataFrame, run_id: str, dataset_id: str):
 
-    logger.info("Prediction pipeline started for run_id=%s and dataset_id=%s", mlflow_run_id, dataset_id)
+    logger.info("Prediction pipeline started for mlflfow_run_id=%s and dataset_id=%s", mlflow_run_id, dataset_id)
     mlflow.set_tracking_uri("http://mlflow:5000")
 
+    conn = get_connection()
+    try:
+        query = """
+            SELECT mlflow_run_id, model_name
+            FROM ml_runs
+            WHERE run_id = %s AND stage = 'train'
+        """
+
+        with conn.cursor() as cur:
+            cur.execute(query, (run_id,))
+            row = cur.fetchone()
+
+        if not row:
+            raise ValueError(f"No training record found for run_id={run_id}")
+
+        mlflow_run_id, best_model_name = row
+
+    finally:
+        conn.close()
     # Silent failure if trained on some dataset but evaluating on other without checking   
     run = mlflow.get_run(mlflow_run_id)
     trained_dataset_id = run.data.params.get("dataset_id")
@@ -67,9 +84,14 @@ def predict_pipeline(df: pd.DataFrame, mlflow_run_id: str, dataset_id: str):
     
     encoders, FEATURES = load_artifacts(mlflow_run_id)
 
-    model_uri = f"runs:/{mlflow_run_id}/model"
-    model = mlflow.pyfunc.load_model(model_uri)
-
+    best_model_name = run.data.params.get("best_model")
+    if best_model_name == "lgb":
+        model = mlflow.lightgbm.load_model(f"runs:/{mlflow_run_id}/best_model")
+    elif best_model_name == "xgb":
+        model = mlflow.xgboost.load_model(f"runs:/{mlflow_run_id}/best_model")
+    else:
+        raise ValueError(f"Unknown model type: {best_model_name}")
+    
     df = preprocess(df)
     df = transform(df, encoders)
 
@@ -85,10 +107,11 @@ def predict_pipeline(df: pd.DataFrame, mlflow_run_id: str, dataset_id: str):
         conn = get_connection()
         log_prediction_run(
             conn=conn,
-            run_id=None,  
+            run_id=run_id,
             dataset_id=dataset_id,
-            model_version=mlflow_run_id,  
-            prediction_count=len(df),
+            mlflow_run_id=mlflow_run_id,
+            model_name=best_model_name,
+            prediction_count=len(df)
         )
     finally:
         if conn:

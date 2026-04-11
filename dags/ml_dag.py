@@ -3,17 +3,15 @@ from airflow.operators.python import PythonOperator
 from datetime import datetime
 import uuid
 import os
+import pandas as pd
+from utils.db import get_connection
 
-default_args = {
-    "owner": "airflow",
-    "retries": 2,
-}
 
 BASE_PATH = "/opt/airflow/data"
 
 
 def task_create_run(**context):
-    from utils.db import get_connection
+    
     from utils.ml_helpers import create_or_get_ml_run
 
     run_date = context["ds"]
@@ -27,17 +25,20 @@ def task_create_run(**context):
             triggered_by="airflow"
         )
 
-    return {"run_id": run_id}
+    return {
+        "run_id": run_id,
+        "run_date": run_date
+    }
 
 
 def task_build_dataset(**context):
-    from data_loader import DataLoader, build_dataset
-    
+    from utils.ml_helpers import log_dataset
     ti = context["ti"]
-    prev = ti.xcom_pull(task_ids="create_run")
+    run_context = ti.xcom_pull(task_ids="create_run")
+    run_date = run_context["run_date"]
+    run_id = run_context["run_id"]   # airflow gives this
 
-    run_id = prev["run_id"]
-    run_date = context["ds"]
+    #Config driven in version 2
 
     cfg = DataLoader(
         pipeline_name="etl_pipeline",
@@ -48,113 +49,110 @@ def task_build_dataset(**context):
     )
 
     df, meta = build_dataset(cfg)
+    dataset_id = meta["dataset_id"]
+    dataset_path = meta["dataset_path"]
+    time_start = meta["time_start"]
+    time_end = meta["time_end"]
 
-    os.makedirs(BASE_PATH, exist_ok=True)
-    path = f"{BASE_PATH}/{meta['dataset_id']}.parquet"
-
-    if not os.path.exists(path):
-        df.to_parquet(path)
+    os.makedirs(os.path.dirname(dataset_path), exist_ok=True)
+    if not os.path.exists(dataset_path):
+        df.to_parquet(dataset_path, index=False)
 
     with get_connection() as conn:
-        write_ml_dataset(
-            conn=conn,
-            run_id=run_id,
-            cfg=cfg,
-            meta=meta
+        log_dataset(
+            conn,
+            run_id,
+            meta
         )
-    
+
     return {
         "run_id": run_id,
-        "dataset_id": meta["dataset_id"],
-        "data_path": path
+        "dataset_id": dataset_id,
+        "dataset_path": dataset_path,
+        "metadata": meta
     }
+
 
 def task_train(**context):
     import pandas as pd
     from train import train_pipeline
 
     ti = context["ti"]
-    meta = ti.xcom_pull(task_ids="build_dataset")
 
-    df = pd.read_parquet(meta["data_path"])
+    run_context = ti.xcom_pull(task_ids="create_run")
+    dataset_context = ti.xcom_pull(task_ids="build_dataset")
+    dataset_path = dataset_context["dataset_path"]
+    
+    df = pd.read_parquet(dataset_path)
 
-    result = train_pipeline(
+    train_pipeline(
         df=df,
-        run_id=meta["run_id"],
-        dataset_id=meta["dataset_id"]
+        run_id=run_context["run_id"],
+        dataset_id=dataset_context["dataset_id"],
+        meta=dataset_context
     )
 
-    # EXPECT train_pipeline RETURNS:
-    # {
-    #   "mlflow_run_id": ...,
-    #   "train_path": ...,
-    #   "val_path": ...,
-    #   "test_path": ...
-    # }
-
     return {
-        "run_id": meta["run_id"],
-        "dataset_id": meta["dataset_id"],
-        **result
+        "run_id": run_context["run_id"],
+        "dataset_id": dataset_context["dataset_id"],
+        "dataset_path": dataset_context["dataset_path"]
     }
 
-
-# --------------------------
-# TASK 4: PREDICT
-# --------------------------
 
 def task_predict(**context):
     import pandas as pd
     from predict import predict_pipeline
 
     ti = context["ti"]
-    meta = ti.xcom_pull(task_ids="train")
+    train_context = ti.xcom_pull(task_ids="train")
+    run_context = ti.xcom_pull(task_ids="create_run")
 
-    df_test = pd.read_parquet(meta["test_path"])
+    run_id = run_context["run_id"]
+    dataset_id = train_context["dataset_id"]
+    dataset_path = train_context["dataset_path"]
 
-    df_pred = predict_pipeline(
-        df=df_test,
-        mlflow_run_id=meta["mlflow_run_id"],
-        dataset_id=meta["dataset_id"]
+    df = pd.read_parquet(dataset_path)
+
+    predict_pipeline(
+        df=df,
+        run_id=run_id,
+        dataset_id=dataset_id
     )
 
-    # Persist predictions
-    pred_path = f"{BASE_PATH}/pred_{meta['dataset_id']}.parquet"
-
-    if not os.path.exists(pred_path):
-        df_pred.to_parquet(pred_path)
-
     return {
-        "run_id": meta["run_id"],
-        "dataset_id": meta["dataset_id"],
-        "mlflow_run_id": meta["mlflow_run_id"],
-        "pred_path": pred_path
+        "run_id": train_context["run_id"],
+        "dataset_id": train_context["dataset_id"],
+        "dataset_path": train_context["dataset_path"]
     }
 
-
-# --------------------------
-# TASK 5: EVALUATE
-# --------------------------
 
 def task_evaluate(**context):
     import pandas as pd
     from evaluate import evaluate_pipeline
 
     ti = context["ti"]
-    meta = ti.xcom_pull(task_ids="predict")
 
-    df_pred = pd.read_parquet(meta["pred_path"])
+    run_context = ti.xcom_pull(task_ids="create_run")
+    dataset_context = ti.xcom_pull(task_ids="build_dataset")
 
+    run_id = run_context["run_id"]
+    dataset_id = dataset_context["dataset_id"]
+    dataset_path = dataset_context["dataset_path"]
+
+    df = pd.read_parquet(dataset_path)
+
+    # evaluation assumes prediction column already exists (from predict step)
     evaluate_pipeline(
-        df=df_pred,
-        mlflow_run_id=meta["mlflow_run_id"],
-        dataset_id=meta["dataset_id"]
+        df=df,
+        run_id=run_id,
+        dataset_id=dataset_id
     )
 
+    return {
+        "run_id": run_id,
+        "dataset_id": dataset_id,
+    }
 
-# --------------------------
-# TASK 6: FINALIZE
-# --------------------------
 
 def task_finalize(**context):
     from utils.db import get_connection
@@ -178,9 +176,11 @@ def task_finalize(**context):
 with DAG(
     dag_id="ml_pipeline_final",
     start_date=datetime(2024, 1, 1),
-    schedule_interval="@daily",
+    schedule_interval="@weekly",
     catchup=False,
-    default_args=default_args,
+    max_active_runs=1,
+    owner="airflow",
+    retries=2
 ) as dag:
 
     create_run = PythonOperator(
@@ -213,5 +213,4 @@ with DAG(
         python_callable=task_finalize,
     )
 
-    # Dependencies
     create_run >> build_dataset >> train >> predict >> evaluate >> finalize

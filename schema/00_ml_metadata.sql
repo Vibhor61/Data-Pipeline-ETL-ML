@@ -2,8 +2,6 @@ CREATE TABLE IF NOT EXISTS ml_pipeline_runs(
     run_id              TEXT PRIMARY KEY,
     pipeline_name       TEXT,
 
-    dag_hash            TEXT,
-    pipeline_config_hash TEXT,
     status              TEXT,
     triggered_by        TEXT,
 

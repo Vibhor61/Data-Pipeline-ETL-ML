@@ -21,10 +21,30 @@ def wmape(y_true, y_pred):
     return np.sum(np.abs(y_true - y_pred)) / (np.sum(np.abs(y_true)) + 1e-8)
 
 # Slice key harcoded in version1
-def evaluate_pipeline(df: pd.DataFrame, mlflow_run_id: str ,dataset_id: str):
+def evaluate_pipeline(df: pd.DataFrame, run_id: str ,dataset_id: str):
 
     logger.info("Prediction pipeline started for mlflow_run_id=%s and dataset_id=%s", mlflow_run_id, dataset_id)
     mlflow.set_tracking_uri("http://mlflow:5000")
+
+    conn = get_connection()
+    try:
+        query = """
+            SELECT mlflow_run_id
+            FROM ml_runs
+            WHERE run_id = %s AND stage = 'train'
+        """
+
+        with conn.cursor() as cur:
+            cur.execute(query, (run_id,))
+            row = cur.fetchone()
+
+        if not row:
+            raise ValueError(f"No training run found for run_id={run_id}")
+
+        mlflow_run_id = row[0]
+
+    finally:
+        conn.close()
 
     # Silent failure if trained on some dataset but evaluating on other without checking
     run = mlflow.get_run(mlflow_run_id)
@@ -53,22 +73,24 @@ def evaluate_pipeline(df: pd.DataFrame, mlflow_run_id: str ,dataset_id: str):
     error_mean = df["errors"].mean()
     error_std = df["errors"].std()
 
+    metrics = {
+        "rmse": test_rmse,
+        "mae": test_mae,
+        "mape": test_mape,
+        "wmape": test_wmape,
+        "error_mean": error_mean,
+        "error_std": error_std,
+    }
+
     conn = None
     try:
         conn = get_connection()
         log_evaluation_metrics(
             conn=conn,
-            run_id=None,  
+            run_id=run_id,  
             dataset_id=dataset_id,
             model_version=mlflow_run_id,
-            metrics={
-                "rmse": test_rmse,
-                "mae": test_mae,
-                "mape": test_mape,
-                "wmape": test_wmape,
-                "error_mean": error_mean,
-                "error_std": error_std,
-            },
+            metrics=metrics,
             slice_key="overall",
         )    
         
@@ -90,20 +112,28 @@ def evaluate_pipeline(df: pd.DataFrame, mlflow_run_id: str ,dataset_id: str):
     worst_depts = dept_rmse.sort_values(ascending=False).head(5)
     best_depts = dept_rmse.sort_values(ascending=True).head(5)
 
+    conn = get_connection()
+    try:
+        log_evaluation_run(
+            conn=conn,
+            run_id=run_id,
+            dataset_id=dataset_id,
+            mlflow_run_id=mlflow_run_id,
+            metrics=metrics,
+            slice_key="overall"
+        )
+    finally:
+        conn.close()
+
     with mlflow.start_run(run_id=mlflow_run_id):
 
-        mlflow.log_metric("test_rmse", test_rmse)
-        mlflow.log_metric("test_mae", test_mae)
-        mlflow.log_metric("test_mape", test_mape)
-        mlflow.log_metric("test_wmape", test_wmape)
-
-        mlflow.log_metric("error_mean", error_mean)
-        mlflow.log_metric("error_std", error_std)
+        for k, v in metrics.items():
+            mlflow.log_metric(k, v)
 
         mlflow.log_param("worst_stores", ",".join(map(str, worst_stores.index)))
         mlflow.log_param("best_stores", ",".join(map(str, best_stores.index)))
 
         mlflow.log_param("worst_depts", ",".join(map(str, worst_depts.index)))
         mlflow.log_param("best_depts", ",".join(map(str, best_depts.index)))
-    
-    logger.info("Evaluation completed")
+
+    logger.info("Evaluation completed run_id=%s", run_id)
