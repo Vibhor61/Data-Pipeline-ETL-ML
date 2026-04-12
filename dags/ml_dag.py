@@ -38,8 +38,6 @@ def task_build_dataset(**context):
     run_date = run_context["run_date"]
     run_id = run_context["run_id"]   # airflow gives this
 
-    #Config driven in version 2
-
     cfg = DataLoader(
         pipeline_name="etl_pipeline",
         run_date=run_date,
@@ -51,8 +49,6 @@ def task_build_dataset(**context):
     df, meta = build_dataset(cfg)
     dataset_id = meta["dataset_id"]
     dataset_path = meta["dataset_path"]
-    time_start = meta["time_start"]
-    time_end = meta["time_end"]
 
     os.makedirs(os.path.dirname(dataset_path), exist_ok=True)
     if not os.path.exists(dataset_path):

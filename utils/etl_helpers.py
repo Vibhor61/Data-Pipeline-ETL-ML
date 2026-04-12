@@ -13,6 +13,9 @@ def safe_table_identifier(table_name: str) -> sql.Identifier:
 
 
 def report_table_count(conn, table_name: str, run_date: Optional[str] = None) -> int:
+    """ 
+    Returns row count for a table, optionally filtered by run_date.
+    """
     ident = safe_table_identifier(table_name)
 
     if run_date:
@@ -43,8 +46,8 @@ def create_or_get_run(
     triggered_by: str = "scheduler",
 ) -> int:
     """
-    Idempotent: one row per (pipeline_name, dag_id, run_date).
-    Requires UNIQUE(pipeline_name, dag_id, run_date) on etl_pipeline_runs.
+    Creates or resets a pipeline run record for (pipeline_name, dag_id, run_date).
+    Idempotent via ON CONFLICT; always returns run_id.
     """
     sql_q = """
         INSERT INTO etl_pipeline_runs (dag_id, pipeline_name, run_date, status, triggered_by)
@@ -72,6 +75,10 @@ def update_run_status(
     status: str, 
     error_message: Optional[str] = None
 ):
+    """
+    Updates pipeline run status (running, success, failed).
+    Sets ended_at only for terminal states.
+    """
     if status not in ("running", "success", "failed"):
         raise ValueError(f"Invalid status: {status}")
 
@@ -108,6 +115,10 @@ def update_run_rows(
     rows_silver: Optional[int] = None,
     rows_gold: Optional[int] = None,
 ):
+    """
+    Updates row count metrics (bronze/silver/gold) for a pipeline run.
+    Only updates fields provided.
+    """
     updates = []
     params = []
 
@@ -144,6 +155,10 @@ def start_step(
     dag_id: str, 
     step_name: str
 ):
+    """
+    Marks a pipeline step as running for a given run_id.
+    Idempotent via ON CONFLICT on (run_id, step_name).
+    """
     sql_q = """
         INSERT INTO etl_pipeline_steps (run_id, dag_id, step_name, status)
         VALUES (%s, %s, %s, 'running')
@@ -172,6 +187,10 @@ def finish_step(
     output_rows: int = 0,
     error_message: Optional[str] = None,
 ):
+    """
+    Marks a pipeline step as success or failed with row metrics.
+    Records timing and optional error message.
+    """
     if status not in ("success", "failed"):
         raise ValueError("finish_step status must be 'success' or 'failed'")
 

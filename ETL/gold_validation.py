@@ -1,8 +1,43 @@
+"""
+Gold storage schema validation.
+
+Enforces strict schema, partition integrity, and storage-level invariants
+before persisting Gold data.
+
+Design principles:
+- validation is split into two stages:
+    1. storage validation (this layer)
+    2. ML usability validation (performed in ML pipeline)
+- feature columns are allowed but not strictly validated here
+- schema drift is prevented using strict=True
+- feature Engineering must happen before validation
+"""
+
+
 import pandera as pa
 from pandera import Column, Check
 
 VALID_EVENT_TYPES = {"Sporting", "Cultural", "National", "Religious", None}
 
+"""
+Gold Storage Schema:
+    Enforces:
+        - Typed, fully materialized dataset ready for storage
+        - Single run_date and pipeline_version per batch (partition integrity)
+        - Unique grain: (item_id, store_id, d, run_date)
+        - Non-negative sales and sell_price
+        - Valid domain constraints (state_id, event_type)
+
+    Does NOT enforce:
+        - ML feature usability (null thresholds, distributions, leakage)
+        - Completeness or correctness of engineered features
+        - Statistical properties of features
+
+    Design notes:
+        - strict=True prevents unexpected columns (schema drift)
+        - coerce=True ensures type normalization before validation
+        - feature columns are allowed but validated later in ML layer
+"""
 GoldStorageSchema = pa.DataFrameSchema(
     columns={
         # Identifiers
@@ -15,12 +50,12 @@ GoldStorageSchema = pa.DataFrameSchema(
         "d": Column(pa.String, nullable=False),
 
         # Core values
-        "sales": Column(pa.Int, nullable=False, checks=Check.ge(0)),
-        "sell_price": Column(pa.Float, nullable=True, checks=Check.ge(0)),
+        "sales": Column(pa.Int, nullable=False, checks=Check.ge(0)), # Sales can never be negative
+        "sell_price": Column(pa.Float, nullable=True, checks=Check.ge(0)), # Can be missing but never negative
 
-        "run_date": Column(pa.DateTime, nullable=False),
-        "_processed_time": Column(pa.DateTime, nullable=False),
-        "_pipeline_version": Column(pa.String, nullable=False),
+        "run_date": Column(pa.DateTime, nullable=False), # partition key
+        "_processed_time": Column(pa.DateTime, nullable=False), # ETL processing timestamp
+        "_pipeline_version": Column(pa.String, nullable=False), # lineage/version tracking
 
         # Time features
         "wm_yr_wk": Column(pa.Int, nullable=False),

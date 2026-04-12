@@ -1,3 +1,24 @@
+"""
+Bronze Layer - ETL Pipeline
+
+This module implements a batch ingestion pipeline that:
+- Loads raw sales, calendar, and pricing data
+- Transforms sales into a run_date-partitioned bronze table
+- Ensures idempotent overwrites per run_date partition
+
+Input: Raw CSV's of M5 data
+Output: All tables stored in database(Postgres)
+
+Core design principles:
+- run_date is the source of truth for all data slicing
+- ingestion is partition-based (DELETE + INSERT per run_date) with no incremental merging logic 
+
+Invariants:
+- bronze_sales is fully overwritten per run_date (no partial updates)
+- run_date uniquely determines d via BASE_DATE offset
+- downstream layer must not assume data correctness 
+"""
+
 import argparse
 import logging
 import os
@@ -49,9 +70,16 @@ def validate_file(path: Path) -> None:
 
 
 def run_date_to_d(run_date: str)-> str:
+    """ 
+    Converts business run_date into dataset column identifier(d_col).
+    Args: 
+        run_date (str): execution date in YYYY-MM-DD format
+    Returns:
+        str: dataset column identifier (e.g., d_1000)
+    """
     base = datetime.datetime.strptime(BASE_DATE, "%Y-%m-%d").date()
     target = datetime.datetime.strptime(run_date, "%Y-%m-%d").date()
-    
+    # Mapping run_date to d
     delta_days = (target - base).days + 1
     if delta_days <= 0:
         raise ValueError(
@@ -62,6 +90,15 @@ def run_date_to_d(run_date: str)-> str:
 
 
 def extract_bronze_partition(run_date: str, d_col: str, sales_csv_path: Path) -> pd.DataFrame:
+    """
+    Extract sales data slice for a given run_date.
+    Args:
+        run_date (str): execution date
+        d_col (str): dataset column identifier
+        sales_csv_path (Path): raw sales dataset path
+    Returns:
+        pd.DataFrame: normalized bronze partition
+    """
     required_id_cols = ["item_id", "dept_id", "cat_id", "store_id", "state_id"]
 
     usecols = required_id_cols + [d_col]
@@ -99,6 +136,13 @@ def extract_bronze_partition(run_date: str, d_col: str, sales_csv_path: Path) ->
 
 
 def extract_calendar(calendar_csv_path: Path) -> pd.DataFrame:
+    """
+    Load calendar dimension dataset.
+    Args:
+        calendar_csv_path (Path): path to calendar CSV
+    Returns:
+        pd.DataFrame: cleaned calendar dimension table
+    """
     df = pd.read_csv(calendar_csv_path)
 
     expected_cols = [
@@ -118,6 +162,13 @@ def extract_calendar(calendar_csv_path: Path) -> pd.DataFrame:
 
 
 def extract_sell_prices(sell_prices_csv_path: Path) -> pd.DataFrame:
+    """
+    Load sell_prices dataset.
+    Args:
+        sell_prices_csv_path (Path): path to sell prices CSV
+    Returns:
+        pd.DataFrame: cleaned sell prices table
+    """
     df = pd.read_csv(sell_prices_csv_path)
 
     expected_cols = ["store_id", "item_id", "wm_yr_wk", "sell_price"]
@@ -130,6 +181,16 @@ def extract_sell_prices(sell_prices_csv_path: Path) -> pd.DataFrame:
 
 
 def overwrite_table(conn, table_name: str, df: pd.DataFrame, columns: list[str]):
+    """
+    Overwrites full content of a PostgreSQL table. 
+    Activated only when either of this file is updatedand passed manually via CLI.
+    Strategy used: DELETE + INSERT
+    Args:
+        conn: PostgreSQL connection
+        table_name (str): target table
+        df (pd.DataFrame): input data
+        columns (list[str]): ordered column mapping
+    """
     validate_table_name(table_name)
 
     delete_sql = sql.SQL("DELETE FROM {}").format(sql.Identifier(table_name))
@@ -151,6 +212,16 @@ def overwrite_table(conn, table_name: str, df: pd.DataFrame, columns: list[str])
 
 
 def overwrite_bronze_partition(conn, df: pd.DataFrame, run_date: str):
+    """
+    Idempotently overwrites bronze table partition for run_date.
+    Strategy:
+    - Deletes existing partition for run_date
+    - Inserts fresh data for same partition
+    Args:
+        conn: PostgreSQL connection
+        df (pd.DataFrame): prepared bronze dataset
+        run_date (str): partition key
+    """
     validate_table_name(BRONZE_TABLE)
 
     try:
@@ -170,6 +241,7 @@ def overwrite_bronze_partition(conn, df: pd.DataFrame, run_date: str):
             VALUES %s
             """
         ).format(sql.Identifier(BRONZE_TABLE))
+    
         with conn.cursor() as cur:
             logger.info("Deleting existing bronze partition for run_date=%s", run_date)
             cur.execute(delete_sql, (run_date,))
@@ -179,12 +251,33 @@ def overwrite_bronze_partition(conn, df: pd.DataFrame, run_date: str):
                 "d", "sales", "run_date", "_pipeline_version"
             ]
             execute_values(cur, insert_sql.as_string(conn), df[bronze_cols].values.tolist())
+        
     except Exception:
         logger.exception("Error preparing SQL statements for bronze load")
         raise
 
 
 def run_bronze(run_date: str, d_col: str, sales_csv_path:Path, calendar_csv_path: Path | None, sell_prices_csv_path: Path | None) :
+    """
+    Executes bronze ETL pipeline.
+    Pipeline stages:
+    1. Validate input files
+    2. Extract sales partition
+    3. Load bronze table (idempotent overwrite)
+    4. Optionally load calendar dimension
+    5. Optionally load sell prices dimension
+    6. Commit transaction
+
+    Args:
+        run_date (str): execution date
+        d_col (str): dataset column identifier
+        sales_csv_path (Path): sales dataset path
+        calendar_csv_path (Path | None): optional calendar dataset
+        sell_prices_csv_path (Path | None): optional sell price dataset
+
+    Raises:
+        ValueError: if bronze extraction produces empty dataset
+    """
     validate_file(sales_csv_path)
 
     bronze_df = extract_bronze_partition(run_date, d_col, sales_csv_path)

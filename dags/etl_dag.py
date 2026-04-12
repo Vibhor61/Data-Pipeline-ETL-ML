@@ -8,7 +8,6 @@ import logging
 import os
 import sys
 from pathlib import Path
-import psycopg2
 import subprocess
 from utils.db import get_connection
 
@@ -42,6 +41,10 @@ def get_run_id(context) -> int:
     return context["ti"].xcom_pull(task_ids="init_run", key="run_id")
 
 def run_init(**context):
+    """
+    Initializes pipeline run metadata and creates run_id.
+    Pushes run_id to XCom for downstream tasks.
+    """
     conn = get_connection()
     run_id = None
 
@@ -71,7 +74,15 @@ def run_init(**context):
 
 
 def execute_step(step_name:str, cmd:list[str], output_table:str, input_table:str|None, **context):
-    
+    """
+    Executes a pipeline step (bronze/silver/gold) with metadata tracking.
+
+    - Marks step start in metadata
+    - Runs ETL module via subprocess
+    - Captures input/output row counts
+    - Marks step success or failure with metrics
+    - Updates pipeline-level row counts
+    """
     conn = get_connection()
     run_id = get_run_id(context)
     run_date = get_run_date(context)
@@ -138,6 +149,9 @@ def execute_step(step_name:str, cmd:list[str], output_table:str, input_table:str
 
 
 def bronze_task(run_date:str, sales_csv_path: str, calendar_csv_path:str | None, sell_prices_csv_path: str |None):
+    """
+    Triggers Bronze ETL module via CLI command.
+    """ 
     cmd = [
         "python",
         "-m",
@@ -160,6 +174,9 @@ def bronze_task(run_date:str, sales_csv_path: str, calendar_csv_path:str | None,
     )
 
 def silver_task(run_date:str):
+    """
+    Triggers Silver ETL module via CLI command.
+    """
     execute_step(
         step_name="silver",
         cmd=[
@@ -174,6 +191,9 @@ def silver_task(run_date:str):
 
 
 def gold_task(run_date: str):
+    """
+    Triggers Gold ETL module via CLI command.
+    """
     execute_step(
         step_name="gold",
         cmd=[
@@ -188,6 +208,12 @@ def gold_task(run_date: str):
 
 
 def finalize_pipeline(**context):
+    """
+    Finalizes pipeline run status based on task outcomes.
+
+    Marks run as success only if all steps succeed,
+    otherwise marks as failed with aggregated error state.
+    """
     conn = get_connection()
     try:
         run_id = get_run_id(context)

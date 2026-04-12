@@ -1,8 +1,12 @@
+-- ETL Metadata Tables
+-- Tracks pipeline-level runs and step-level execution details.
+-- Used by Airflow DAG to record lineage, status, and observability metrics.
+
 CREATE TABLE IF NOT EXISTS etl_pipeline_runs (
-    run_id             BIGSERIAL PRIMARY KEY,
-    dag_id             TEXT NOT NULL,  
+    run_id             BIGSERIAL PRIMARY KEY,   -- generated automatically per pipeline run
+    dag_id             TEXT NOT NULL,           -- Airflow DAG identifier
     pipeline_name      TEXT NOT NULL,
-    run_date           DATE NOT NULL,  
+    run_date           DATE NOT NULL,           -- business date (Airflow execution date)
 
     status             TEXT NOT NULL CHECK (status IN ('running', 'success', 'failed')),
     triggered_by       TEXT NOT NULL DEFAULT 'scheduler',
@@ -31,7 +35,7 @@ CREATE TABLE IF NOT EXISTS etl_pipeline_steps (
     step_run_id        BIGSERIAL PRIMARY KEY,
     run_id             BIGINT NOT NULL REFERENCES etl_pipeline_runs(run_id) ON DELETE CASCADE,
 
-    step_name          TEXT NOT NULL,
+    step_name          TEXT NOT NULL,       -- bronze, silver, gold
     status             TEXT NOT NULL CHECK (status IN ('running', 'success', 'failed', 'skipped')),
 
     started_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),

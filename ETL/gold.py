@@ -1,3 +1,23 @@
+"""
+Gold Layer - ETL Pipeline
+
+Builds feature-engineered dataset from Silver data.
+
+Input: Silver data up to run_date
+Output: Fully materialized Gold partition (same run_date)
+
+Core design principles:
+- run_date is the source of truth for all data slicing
+- ingestion is partition-based (DELETE + INSERT per run_date)
+- features are computed using only past data
+- strict schema validation before commit
+
+Invariants:
+- exactly one Gold partition exists per run_date
+- unique grain: (item_id, store_id, d, run_date)
+- no future data is used in feature computation
+- schema is strictly enforced (no extra/missing columns)
+"""
 import logging
 import os
 import argparse
@@ -25,6 +45,27 @@ def validate_table_name(table_name: str) -> sql.Identifier:
 
 
 def build_gold_partition(conn, run_date: str) -> int:
+    """
+    Builds and validates Gold partition for a given run_date.
+    Args:
+        conn: active PostgreSQL connection
+        run_date (str): execution date in YYYY-MM-DD format
+    Returns:
+        int: number of rows inserted into Gold partition
+
+    Process:
+        - Deletes existing partition for run_date (idempotent overwrite)
+        - Extracts Silver data up to run_date for feature computation
+        - Computes lag features (1, 3, 7, 14, 28 days)
+        - Computes rolling statistics (mean, std) over historical windows
+        - Handles missing lags using rolling aggregates
+        - Derives additional features (is_weekend, quarter, cold_start)
+        - Inserts fully materialized feature set into Gold table
+        - Validates inserted data using GoldStorageSchema(Pandera based)
+
+    Raises:
+        ValueError: if partition is empty or validation fails
+    """
     silver_ident = validate_table_name(SILVER_TABLE)
     gold_ident = validate_table_name(GOLD_TABLE)
 
@@ -143,6 +184,19 @@ def build_gold_partition(conn, run_date: str) -> int:
 
 
 def run_gold(run_date: str) -> int:
+    """
+    Executes Gold ETL pipeline for a given run_date.
+    Args:
+        run_date (str): execution date in YYYY-MM-DD format
+    Returns:
+        int: number of rows inserted into Gold table
+
+    Process:
+        - Establishes database connection
+        - Builds Gold partition
+        - Commits transaction on success
+        - Rolls back on failure
+    """
     conn = get_connection()
     try:
         inserted_rows = build_gold_partition(conn, run_date)
