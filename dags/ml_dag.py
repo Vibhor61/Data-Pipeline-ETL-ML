@@ -1,24 +1,26 @@
 from airflow import DAG
 from airflow.operators.python import PythonOperator
 from datetime import datetime
-import uuid
 import os
 import pandas as pd
 from utils.db import get_connection
+from utils.ml_helpers import log_dataset, create_or_get_ml_pipeline_run
 
+from ML.train import train_pipeline
+from ML.data_loader import DataLoader,build_dataset
+from ML.predict import predict_pipeline
+from ML.evaluate import evaluate_pipeline
 
 BASE_PATH = "/opt/airflow/data"
 
 
 def task_create_run(**context):
-    
-    from utils.ml_helpers import create_or_get_ml_run
 
     run_date = context["ds"]
     run_id = f"ml_pipeline_{run_date}"
 
     with get_connection() as conn:
-        create_or_get_ml_run(
+        create_or_get_ml_pipeline_run(
             conn=conn,
             run_id=run_id,
             pipeline_name="ml_pipeline",
@@ -32,7 +34,7 @@ def task_create_run(**context):
 
 
 def task_build_dataset(**context):
-    from utils.ml_helpers import log_dataset
+
     ti = context["ti"]
     run_context = ti.xcom_pull(task_ids="create_run")
     run_date = run_context["run_date"]
@@ -70,11 +72,8 @@ def task_build_dataset(**context):
 
 
 def task_train(**context):
-    import pandas as pd
-    from train import train_pipeline
-
+    
     ti = context["ti"]
-
     run_context = ti.xcom_pull(task_ids="create_run")
     dataset_context = ti.xcom_pull(task_ids="build_dataset")
     dataset_path = dataset_context["dataset_path"]
@@ -96,9 +95,7 @@ def task_train(**context):
 
 
 def task_predict(**context):
-    import pandas as pd
-    from predict import predict_pipeline
-
+   
     ti = context["ti"]
     train_context = ti.xcom_pull(task_ids="train")
     run_context = ti.xcom_pull(task_ids="create_run")
@@ -123,8 +120,6 @@ def task_predict(**context):
 
 
 def task_evaluate(**context):
-    import pandas as pd
-    from evaluate import evaluate_pipeline
 
     ti = context["ti"]
 
@@ -164,10 +159,6 @@ def task_finalize(**context):
             status="success"
         )
 
-
-# --------------------------
-# DAG
-# --------------------------
 
 with DAG(
     dag_id="ml_pipeline_final",

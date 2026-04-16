@@ -12,7 +12,7 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./postgres:/docker-entrypoint-initdb.d  # For automatic initialization 
+      - ./schema:/docker-entrypoint-initdb.d  # For automatic initialization 
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${PG_USER} -d ${PG_DB}"]
       interval: 10s
@@ -30,11 +30,12 @@ services:
     volumes:
       - ./dags:/opt/airflow/dags
       - ./ETL:/opt/airflow/etl
-      - ./scripts:/opt/airflow/scripts
+      - ./utils:/opt/airflow/utils
       - ./data:/opt/airflow/data
       - ./logs:/opt/airflow/logs
     entrypoint: /bin/bash
-    command: -c "airflow db migrate && airflow users create \
+    # Runs against airflow_db
+    command: -c "airflow db migrate && airflow users create \ 
       --username admin \
       --password admin \
       --firstname admin \
@@ -53,7 +54,7 @@ services:
     volumes:
       - ./dags:/opt/airflow/dags
       - ./ETL:/opt/airflow/etl
-      - ./scripts:/opt/airflow/scripts
+      - ./utils:/opt/airflow/utils
       - ./data:/opt/airflow/data
       - ./logs:/opt/airflow/logs
     ports:
@@ -71,7 +72,7 @@ services:
     volumes:
       - ./dags:/opt/airflow/dags
       - ./ETL:/opt/airflow/etl
-      - ./scripts:/opt/airflow/scripts
+      - ./utils:/opt/airflow/utils
       - ./data:/opt/airflow/data
       - ./logs:/opt/airflow/logs
     command: scheduler
