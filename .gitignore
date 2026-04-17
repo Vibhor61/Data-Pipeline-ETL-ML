@@ -3,6 +3,5 @@ __pycache__/
 mlflow
 airflow.env
 pg.env
-details.txt
-quetsion.txt
-blog.txt
+logs/
+docs/
