@@ -1,7 +1,6 @@
 Data/
 __pycache__/
 mlflow
-airflow.env
-pg.env
+.env
 logs/
 docs/

@@ -2,4 +2,7 @@ FROM apache/airflow:2.8.1
 
 COPY requirements.txt .
 
-RUN pip install --no-cache-dir -r requirements.txt
+# Need constarints to ensure compatibilty
+RUN pip install --no-cache-dir \
+    -r requirements.txt \
+    --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-2.8.1/constraints-3.8.txt"

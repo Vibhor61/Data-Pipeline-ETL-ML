@@ -1,6 +1,7 @@
 -- Airflow
 CREATE DATABASE airflow_db;
 
+\c retail_dw;
 -- Bronze
 \i /docker-entrypoint-initdb.d/00_bronze.sql
 

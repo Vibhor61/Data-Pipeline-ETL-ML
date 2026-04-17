@@ -3,6 +3,7 @@ from airflow.operators.python import PythonOperator
 from airflow.utils.state import State
 from airflow.utils.trigger_rule import TriggerRule
 
+from typing import List, Optional
 from datetime import timedelta, datetime
 import logging
 import os
@@ -73,7 +74,7 @@ def run_init(**context):
         conn.close()
 
 
-def execute_step(step_name:str, cmd:list[str], output_table:str, input_table:str|None, **context):
+def execute_step(step_name:str, cmd:List[str], output_table:str, input_table:Optional[str], **context):
     """
     Executes a pipeline step (bronze/silver/gold) with metadata tracking.
 
@@ -148,7 +149,7 @@ def execute_step(step_name:str, cmd:list[str], output_table:str, input_table:str
         conn.close()
 
 
-def bronze_task(run_date:str, sales_csv_path: str, calendar_csv_path:str | None, sell_prices_csv_path: str |None):
+def bronze_task(run_date:str, sales_csv_path: str, calendar_csv_path: Optional[str], sell_prices_csv_path: Optional[str]):
     """
     Triggers Bronze ETL module via CLI command.
     """ 

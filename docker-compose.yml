@@ -2,8 +2,6 @@ services:
   postgres:
     image: postgres:15
     container_name: retail_postgres
-    env_file:
-      - pg.env
     environment:
       POSTGRES_USER: ${PG_USER}
       POSTGRES_PASSWORD: ${PG_PASSWORD}
@@ -22,26 +20,29 @@ services:
   airflow-init:
     build: .
     container_name: airflow_metadata
-    env_file:
-      - airflow.env
     depends_on:
       postgres:
         condition: service_healthy
+    environment:
+      PYTHONPATH: /opt/airflow
+    env_file:
+      - .env
     volumes:
       - ./dags:/opt/airflow/dags
       - ./ETL:/opt/airflow/etl
       - ./utils:/opt/airflow/utils
       - ./data:/opt/airflow/data
       - ./logs:/opt/airflow/logs
-    entrypoint: /bin/bash
     # Runs against airflow_db
-    command: -c "airflow db migrate && airflow users create \ 
-      --username admin \
-      --password admin \
-      --firstname admin \
-      --lastname admin \
-      --role Admin \
-      --email admin@example.com"
+    command: >
+      bash -c "airflow db migrate &&
+      airflow users create
+      --username admin
+      --password admin
+      --firstname admin
+      --lastname admin
+      --role Admin
+      --email admin@example.com || true"
 
   airflow-webserver:
     build: .
@@ -49,8 +50,10 @@ services:
     depends_on:
       airflow-init:
         condition: service_completed_successfully
+    environment:
+      PYTHONPATH: /opt/airflow
     env_file:
-      - airflow.env
+      - .env
     volumes:
       - ./dags:/opt/airflow/dags
       - ./ETL:/opt/airflow/etl
@@ -67,8 +70,10 @@ services:
     depends_on:
       airflow-init:
         condition: service_completed_successfully
+    environment:
+      PYTHONPATH: /opt/airflow
     env_file:
-      - airflow.env
+      - .env
     volumes:
       - ./dags:/opt/airflow/dags
       - ./ETL:/opt/airflow/etl

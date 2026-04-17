@@ -7,9 +7,9 @@ CREATE TABLE IF NOT EXISTS ml_pipeline_runs(
 
     created_at          TIMESTAMP,
     ended_at            TIMESTAMP
-)
+);
 
-CREATE INDEX IF NOT EXISTS idx_ml_pipeline_runs ON ml_pipeline_runs(run_id)
+CREATE INDEX IF NOT EXISTS idx_ml_pipeline_runs ON ml_pipeline_runs(run_id);
 
 CREATE TABLE IF NOT EXISTS ml_dataset(
     dataset_id           TEXT PRIMARY KEY,
@@ -30,7 +30,7 @@ CREATE TABLE IF NOT EXISTS ml_dataset(
     created_at           TIMESTAMP
 );
 
-CREATE INDEX IF NOT EXISTS idx_ml_dataset ON ml_dataset(dataset_id)
+CREATE INDEX IF NOT EXISTS idx_ml_dataset ON ml_dataset(dataset_id);
 
 CREATE TABLE IF NOT EXISTS ml_runs(
     ml_run_id           TEXT PRIMARY KEY,
@@ -59,9 +59,9 @@ CREATE TABLE IF NOT EXISTS ml_runs(
     CONSTRAINT fk_dataset
         FOREIGN KEY (dataset_id)
         REFERENCES ml_dataset(dataset_id)
-        ON DELETE CASCADE
+        ON DELETE CASCADE,
 
     CONSTRAINT unique_stage_runs UNIQUE (run_id, dataset_id, stage)
-)
+);
 
-CREATE INDEX IF NOT EXISTS idx_ml_runs ON ml_runs(ml_run_id)
+CREATE INDEX IF NOT EXISTS idx_ml_runs ON ml_runs(ml_run_id);
