@@ -23,7 +23,7 @@ import os
 import argparse
 from psycopg2 import sql
 import pandas as pd
-from gold_validation import GoldStorageSchema
+from ETL.gold_validation import GoldStorageSchema
 from utils.db import get_connection
 
 logger = logging.getLogger(__name__)
@@ -68,79 +68,157 @@ def build_gold_partition(conn, run_date: str) -> int:
     """
     silver_ident = validate_table_name(SILVER_TABLE)
     gold_ident = validate_table_name(GOLD_TABLE)
-
+ 
     delete_sql = sql.SQL("DELETE FROM {} WHERE run_date = %s;").format(gold_ident)
-
+ 
     insert_sql = sql.SQL(
         """
-        WITH silver AS (SELECT * FROM {silver} WHERE run_date <= %s),
+        WITH silver_base AS (
+        SELECT
+            item_id,
+            store_id,
+            dept_id,
+            cat_id,
+            state_id,
+            d,
+            sales,
+            sell_price,
+            run_date,
+            _processed_time,
+            _pipeline_version,
 
-        dataset_start_date AS (SELECT MIN(run_date) from silver),
+            wday,
+            weekday,
+            month,
+            year,
+            date,
+            wm_yr_wk,
+
+            event_name_1,
+            event_type_1,
+            event_name_2,
+            event_type_2,
+            snap_ca,
+            snap_tx,
+            snap_wi
+
+        FROM silver_table
+        WHERE run_date <= %s
+        ),
 
         silver_lags AS (
-            SELECT *,
-                LAG(sales, 1) OVER (PARTITION BY item_id, store_id ORDER BY run_date) AS sales_lag_1,
-                LAG(sales, 3) OVER (PARTITION BY item_id, store_id ORDER BY run_date) AS sales_lag_3,
-                LAG(sales, 7) OVER (PARTITION BY item_id, store_id ORDER BY run_date) AS sales_lag_7,
+            SELECT
+                *,
+
+                LAG(sales, 1)  OVER (PARTITION BY item_id, store_id ORDER BY run_date)  AS sales_lag_1,
+                LAG(sales, 3)  OVER (PARTITION BY item_id, store_id ORDER BY run_date)  AS sales_lag_3,
+                LAG(sales, 7)  OVER (PARTITION BY item_id, store_id ORDER BY run_date)  AS sales_lag_7,
                 LAG(sales, 14) OVER (PARTITION BY item_id, store_id ORDER BY run_date) AS sales_lag_14,
                 LAG(sales, 28) OVER (PARTITION BY item_id, store_id ORDER BY run_date) AS sales_lag_28,
 
-                AVG(sales) OVER (PARTITION BY item_id, store_id ORDER BY run_date ROWS BETWEEN 7 PRECEDING AND 1 PRECEDING) AS sales_roll_mean_7,
+                AVG(sales) OVER (PARTITION BY item_id, store_id ORDER BY run_date ROWS BETWEEN 7 PRECEDING AND 1 PRECEDING)  AS sales_roll_mean_7,
                 AVG(sales) OVER (PARTITION BY item_id, store_id ORDER BY run_date ROWS BETWEEN 14 PRECEDING AND 1 PRECEDING) AS sales_roll_mean_14,
                 AVG(sales) OVER (PARTITION BY item_id, store_id ORDER BY run_date ROWS BETWEEN 28 PRECEDING AND 1 PRECEDING) AS sales_roll_mean_28,
-                STDDEV_SAMP(sales) OVER (PARTITION BY item_id, store_id ORDER BY run_date ROWS BETWEEN 7 PRECEDING AND 1 PRECEDING) AS sales_roll_std_7,
+
+                STDDEV_SAMP(sales) OVER (PARTITION BY item_id, store_id ORDER BY run_date ROWS BETWEEN 7 PRECEDING AND 1 PRECEDING)  AS sales_roll_std_7,
                 STDDEV_SAMP(sales) OVER (PARTITION BY item_id, store_id ORDER BY run_date ROWS BETWEEN 14 PRECEDING AND 1 PRECEDING) AS sales_roll_std_14,
-                STDDEV_SAMP(sales) OVER (PARTITION BY item_id, store_id ORDER BY run_date ROWS BETWEEN 28 PRECEDING AND 1 PRECEDING) AS sales_roll_std_28,            
-            
-                CASE 
-                    WHEN run_date < (SELECT MIN(run_date) FROM dataset_start_date) + INTERVAL '28 days' 
-                    THEN TRUE ELSE FALSE 
-                END AS is_cold_start
-            FROM silver 
+                STDDEV_SAMP(sales) OVER (PARTITION BY item_id, store_id ORDER BY run_date ROWS BETWEEN 28 PRECEDING AND 1 PRECEDING) AS sales_roll_std_28
+
+            FROM silver_base
         ),
+
         silver_features AS (
             SELECT
-                item_id, store_id, dept_id, cat_id, state_id, d, sales, sell_price, run_date, _processed_time, _pipeline_version,
-                
-                COALESCE(sales_lag_1,  sales_roll_mean_7)  AS sales_lag_1,
-                COALESCE(sales_lag_3,  sales_roll_mean_7)  AS sales_lag_3,
-                COALESCE(sales_lag_7,  sales_roll_mean_7)  AS sales_lag_7,
-                COALESCE(sales_lag_14, sales_roll_mean_14) AS sales_lag_14,
-                COALESCE(sales_lag_28, sales_roll_mean_28) AS sales_lag_28,
+                item_id,
+                store_id,
+                dept_id,
+                cat_id,
+                state_id,
 
-                COALESCE(sales_roll_mean_7)  AS sales_roll_mean_7,
-                COALESCE(sales_roll_std_7)   AS sales_roll_std_7,
-                COALESCE(sales_roll_mean_14) AS sales_roll_mean_14,
-                COALESCE(sales_roll_std_14)  AS sales_roll_std_14,
-                COALESCE(sales_roll_mean_28) AS sales_roll_mean_28,
-                COALESCE(sales_roll_std_28)  AS sales_roll_std_28,
-                
-                CASE WHEN wday IN (1, 7) THEN 1 ELSE 0 END AS is_weekend,
-                EXTRACT(QUARTER FROM date)::int AS quarter,
-                month, wday, weekday, year, event_name_1, event_type_1, event_name_2, event_type_2,
-                
-                COALESCE(snap_CA, 0) AS snap_CA, 
-                COALESCE(snap_TX, 0) AS snap_TX, 
-                COALESCE(snap_WI, 0) AS snap_WI,
+                d,
+                sales,
+                sell_price,
+                run_date,
+                _processed_time,
+                _pipeline_version,
+
+                wday,
+                weekday,
+                month,
+                year,
                 wm_yr_wk,
-                is_cold_start
+
+                event_name_1,
+                event_type_1,
+                event_name_2,
+                event_type_2,
+
+                COALESCE(snap_ca, 0) AS snap_ca,
+                COALESCE(snap_tx, 0) AS snap_tx,
+                COALESCE(snap_wi, 0) AS snap_wi,
+
+                COALESCE(sales_lag_1,  sales_roll_mean_7, 0)  AS sales_lag_1,
+                COALESCE(sales_lag_3,  sales_roll_mean_7, 0)  AS sales_lag_3,
+                COALESCE(sales_lag_7,  sales_roll_mean_7, 0)  AS sales_lag_7,
+                COALESCE(sales_lag_14, sales_roll_mean_14, 0) AS sales_lag_14,
+                COALESCE(sales_lag_28, sales_roll_mean_28, 0) AS sales_lag_28,
+
+                COALESCE(sales_roll_mean_7,  0) AS sales_roll_mean_7,
+                COALESCE(sales_roll_std_7,   0) AS sales_roll_std_7,
+                COALESCE(sales_roll_mean_14, 0) AS sales_roll_mean_14,
+                COALESCE(sales_roll_std_14,  0) AS sales_roll_std_14,
+                COALESCE(sales_roll_mean_28, 0) AS sales_roll_mean_28,
+                COALESCE(sales_roll_std_28,  0) AS sales_roll_std_28,
+
+                CASE WHEN EXTRACT(DOW FROM date)::int IN (0, 6) THEN 1 ELSE 0 END AS is_weekend,
+                EXTRACT(QUARTER FROM date)::int AS quarter,
+
+                CASE
+                    WHEN run_date < (SELECT MIN(run_date) FROM silver_base) + INTERVAL '28 days'
+                    THEN TRUE ELSE FALSE
+                END AS is_cold_start
+
             FROM silver_lags
         )
-        INSERT INTO {gold} (
-            item_id, store_id, dept_id, cat_id, state_id, d, sales, sell_price, run_date, _processed_time, _pipeline_version,
+
+        INSERT INTO gold_table (
+            item_id, store_id, dept_id, cat_id, state_id,
+            d, sales, sell_price, run_date, _processed_time, _pipeline_version,
+
+            wday, weekday, month, year, wm_yr_wk,
+
             sales_lag_1, sales_lag_3, sales_lag_7, sales_lag_14, sales_lag_28,
-            sales_roll_mean_7, sales_roll_std_7, sales_roll_mean_14, sales_roll_std_14, sales_roll_mean_28, sales_roll_std_28,
-            is_weekend, quarter, month, wday, weekday, year, 
-            event_name_1, event_type_1, event_name_2, event_type_2,
-            snap_CA, snap_TX, snap_WI, wm_yr_wk, is_cold_start
+            sales_roll_mean_7, sales_roll_std_7,
+            sales_roll_mean_14, sales_roll_std_14,
+            sales_roll_mean_28, sales_roll_std_28,
+
+            is_weekend, quarter,
+
+            event_name_1, event_type_1,
+            event_name_2, event_type_2,
+
+            snap_ca, snap_tx, snap_wi,
+            is_cold_start
         )
+
         SELECT
-            item_id, store_id, dept_id, cat_id, state_id, d, sales, sell_price, run_date, _processed_time, _pipeline_version,
+            item_id, store_id, dept_id, cat_id, state_id,
+            d, sales, sell_price, run_date, _processed_time, _pipeline_version,
+
+            wday, weekday, month, year, wm_yr_wk,
+
             sales_lag_1, sales_lag_3, sales_lag_7, sales_lag_14, sales_lag_28,
-            sales_roll_mean_7, sales_roll_std_7, sales_roll_mean_14, sales_roll_std_14, sales_roll_mean_28, sales_roll_std_28,
-            is_weekend, quarter, month, wday, weekday, year, 
-            event_name_1, event_type_1, event_name_2, event_type_2,
-            snap_CA, snap_TX, snap_WI, wm_yr_wk, is_cold_start
+            sales_roll_mean_7, sales_roll_std_7,
+            sales_roll_mean_14, sales_roll_std_14,
+            sales_roll_mean_28, sales_roll_std_28,
+
+            is_weekend, quarter,
+
+            event_name_1, event_type_1,
+            event_name_2, event_type_2,
+
+            snap_ca, snap_tx, snap_wi,
+            is_cold_start
         FROM silver_features
         WHERE run_date = %s;
         """
@@ -155,7 +233,7 @@ def build_gold_partition(conn, run_date: str) -> int:
 
         logger.info("Inserting gold partition for run_date=%s", run_date)
         
-        cur.execute(insert_sql, (run_date,run_date))
+        cur.execute(insert_sql, (run_date,run_date,))
         cur.execute(
             sql.SQL("SELECT COUNT(*) FROM {} WHERE run_date = %s").format(gold_ident),
             (run_date,),
@@ -174,7 +252,9 @@ def build_gold_partition(conn, run_date: str) -> int:
         rows = cur.fetchall()
 
         df = pd.DataFrame(rows, columns=cols)
-
+        print(df["_processed_time"].dtype)
+        print(df["run_date"].dtype)
+        print(df[["_processed_time", "run_date"]].head(5))
         logger.info("Validating gold schema for run_date=%s", run_date)
         GoldStorageSchema.validate(df)
         logger.info("Validation passed for run_date=%s", run_date)

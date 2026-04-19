@@ -25,6 +25,7 @@ import os
 from pathlib import Path
 import datetime
 
+from typing import List, Optional, Tuple
 import pandas as pd
 from psycopg2 import sql
 from psycopg2.extras import execute_values
@@ -145,18 +146,21 @@ def extract_calendar(calendar_csv_path: Path) -> pd.DataFrame:
     """
     df = pd.read_csv(calendar_csv_path)
 
+    df.columns = df.columns.str.lower()
+
     expected_cols = [
         "d", "date", "wm_yr_wk", "weekday", "wday", "month", "year",
         "event_name_1", "event_type_1", "event_name_2", "event_type_2",
-        "snap_CA", "snap_TX", "snap_WI"
+        "snap_ca", "snap_tx", "snap_wi"
     ]
 
     df = df[expected_cols].copy()
 
-    for snap_col in ["snap_CA", "snap_TX", "snap_WI"]:
+    for snap_col in ["snap_ca", "snap_tx", "snap_wi"]:
         if snap_col in df:
             df[snap_col] = df[snap_col].fillna(0).astype(int)
 
+    df.columns = df.columns.str.lower()
     logger.info("Loaded calendar dimension with %s rows", len(df))
     return df
 
@@ -180,7 +184,7 @@ def extract_sell_prices(sell_prices_csv_path: Path) -> pd.DataFrame:
     return df
 
 
-def overwrite_table(conn, table_name: str, df: pd.DataFrame, columns: list[str]):
+def overwrite_table(conn, table_name: str, df: pd.DataFrame, columns: List[str]):
     """
     Overwrites full content of a PostgreSQL table. 
     Activated only when either of this file is updatedand passed manually via CLI.
@@ -257,7 +261,7 @@ def overwrite_bronze_partition(conn, df: pd.DataFrame, run_date: str):
         raise
 
 
-def run_bronze(run_date: str, d_col: str, sales_csv_path:Path, calendar_csv_path: Path | None, sell_prices_csv_path: Path | None) :
+def run_bronze(run_date: str, d_col: str, sales_csv_path:Path, calendar_csv_path: Optional[Path], sell_prices_csv_path: Optional[Path]):
     """
     Executes bronze ETL pipeline.
     Pipeline stages:
@@ -299,7 +303,7 @@ def run_bronze(run_date: str, d_col: str, sales_csv_path:Path, calendar_csv_path
                 [   
                     "d", "date", "wm_yr_wk", "weekday", "wday", "month", "year",
                     "event_name_1", "event_type_1", "event_name_2", "event_type_2",
-                    "snap_CA", "snap_TX", "snap_WI",
+                    "snap_ca", "snap_tx", "snap_wi",
                 ],
             )
             logger.info("Calendar dimension updated successfully for run_date=%s", run_date)    

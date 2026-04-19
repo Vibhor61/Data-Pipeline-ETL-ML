@@ -24,7 +24,7 @@ import argparse
 from psycopg2 import sql
 import pandas as pd
 from utils.db import get_connection
-from silver_validation import SilverSchema
+from ETL.silver_validation import SilverSchema
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(
@@ -102,9 +102,9 @@ def build_silver_partition(conn, run_date: str) -> int:
             event_type_1,
             event_name_2,
             event_type_2,
-            snap_CA,
-            snap_TX,
-            snap_WI
+            snap_ca,
+            snap_tx,
+            snap_wi
         )
         SELECT
             %s::date AS run_date,
@@ -125,12 +125,12 @@ def build_silver_partition(conn, run_date: str) -> int:
             c.month,
             c.year,
             c.event_name_1,
-            c.event_type_1,
+            NULLIF(c.event_type_1, 'NaN') AS event_type_1, -- Convert 'NaN' strings to NULL for proper validation
             c.event_name_2,
-            c.event_type_2,
-            COALESCE(c.snap_CA, 0) AS snap_CA,
-            COALESCE(c.snap_TX, 0) AS snap_TX,
-            COALESCE(c.snap_WI, 0) AS snap_WI
+            NULLIF(c.event_type_2, 'NaN') AS event_type_2, 
+            COALESCE(c.snap_ca, 0) AS snap_ca,
+            COALESCE(c.snap_tx, 0) AS snap_tx,
+            COALESCE(c.snap_wi, 0) AS snap_wi
         FROM bronze b
         JOIN {calendar} c ON b.d = c.d
         LEFT JOIN {sell_prices} s
@@ -161,6 +161,26 @@ def build_silver_partition(conn, run_date: str) -> int:
 
         if inserted == 0:
             raise ValueError(f"Silver partition is empty for run_date={run_date}")
+        
+        # Duplication check to enforce grain 
+        duplicate_check_sql = sql.SQL("""
+            SELECT COUNT(*)
+            FROM (
+                SELECT store_id, item_id, d
+                FROM {}
+                WHERE run_date = %s
+                GROUP BY store_id, item_id, d
+                HAVING COUNT(*) > 1
+            ) dupes
+        """).format(silver_ident)
+
+        cur.execute(duplicate_check_sql, (run_date,))
+        duplicate_rows = cur.fetchone()[0]
+
+        if duplicate_rows > 0:
+            raise ValueError(
+                f"Silver grain violation: {duplicate_rows} duplicate keys for run_date={run_date}"
+            )
         
         cur.execute(
             sql.SQL("SELECT * FROM {} WHERE run_date = %s").format(silver_ident),

@@ -70,6 +70,7 @@ def run_init(**context):
             run_id,
             run_date,
         )
+        raise 
     finally:
         conn.close()
 
@@ -98,13 +99,26 @@ def execute_step(step_name:str, cmd:List[str], output_table:str, input_table:Opt
             input_rows = report_table_count(conn, input_table, run_date=run_date)
 
         logger.info("Running %s command: %s", step_name, cmd)
-        subprocess.run(cmd, check=True)
+        result = subprocess.run(
+            cmd,
+            text=True,
+            capture_output=True
+        )
+
+        if result.stdout:
+            logger.info("Subprocess stdout:\n%s", result.stdout)
+
+        if result.stderr:
+            logger.error("Subprocess stderr:\n%s", result.stderr)
+
+        result.check_returncode()
 
         output_rows = report_table_count(conn, output_table, run_date=run_date)
 
         finish_step(
             conn=conn,
             run_id=run_id,
+            dag_id=DAG_ID,
             step_name=step_name,
             status="success",
             input_rows=input_rows,
@@ -123,11 +137,12 @@ def execute_step(step_name:str, cmd:List[str], output_table:str, input_table:Opt
         )
 
     except Exception as e:
-        error_message = e
+        error_message = str(e)
         try:
             finish_step(
                 conn=conn,
                 run_id=run_id,
+                dag_id=DAG_ID,
                 step_name=step_name,
                 status="failed",
                 input_rows=input_rows,
@@ -149,10 +164,12 @@ def execute_step(step_name:str, cmd:List[str], output_table:str, input_table:Opt
         conn.close()
 
 
-def bronze_task(run_date:str, sales_csv_path: str, calendar_csv_path: Optional[str], sell_prices_csv_path: Optional[str]):
+def bronze_task(sales_csv_path: str, calendar_csv_path: Optional[str], sell_prices_csv_path: Optional[str], **context):
     """
     Triggers Bronze ETL module via CLI command.
     """ 
+    run_date = get_run_date(context)
+
     cmd = [
         "python",
         "-m",
@@ -172,12 +189,16 @@ def bronze_task(run_date:str, sales_csv_path: str, calendar_csv_path: Optional[s
         cmd=cmd,
         output_table=BRONZE_TABLE,
         input_table=None,
+        **context
     )
+    
 
-def silver_task(run_date:str):
+def silver_task(**context):
     """
     Triggers Silver ETL module via CLI command.
     """
+    run_date = get_run_date(context)
+
     execute_step(
         step_name="silver",
         cmd=[
@@ -187,14 +208,17 @@ def silver_task(run_date:str):
             "--run-date",run_date,
         ],
         output_table=SILVER_TABLE,
-        input_table=BRONZE_TABLE
+        input_table=BRONZE_TABLE,
+        **context
     )
 
 
-def gold_task(run_date: str):
+def gold_task(**context):
     """
     Triggers Gold ETL module via CLI command.
     """
+    run_date = get_run_date(context)
+
     execute_step(
         step_name="gold",
         cmd=[
@@ -205,6 +229,7 @@ def gold_task(run_date: str):
         ],
         output_table=GOLD_TABLE,
         input_table=SILVER_TABLE,
+        **context
     )
 
 
@@ -251,8 +276,7 @@ def finalize_pipeline(**context):
 default_args = {
     "owner": "airflow",
     "depends_on_past": False,
-    "retries": 3,
-    "retry_delay": timedelta(minutes=5),
+    "retries": 0,
 }
 
 
@@ -274,6 +298,11 @@ with DAG(
     bronze_run = PythonOperator(
         task_id="bronze",
         python_callable=bronze_task,
+        op_kwargs={
+            "sales_csv_path": "/opt/airflow/data/raw/sales_train_validation.csv",
+            "calendar_csv_path": "/opt/airflow/data/raw/calendar.csv",
+            "sell_prices_csv_path": "/opt/airflow/data/raw/sell_prices.csv",
+        },
     )
 
     silver_run = PythonOperator(

@@ -1,12 +1,8 @@
--- ETL Metadata Tables
--- Tracks pipeline-level runs and step-level execution details.
--- Used by Airflow DAG to record lineage, status, and observability metrics.
-
 CREATE TABLE IF NOT EXISTS etl_pipeline_runs (
-    run_id             BIGSERIAL PRIMARY KEY,   -- generated automatically per pipeline run
-    dag_id             TEXT NOT NULL,           -- Airflow DAG identifier
+    run_id             BIGSERIAL PRIMARY KEY,
+    dag_id             TEXT NOT NULL,
     pipeline_name      TEXT NOT NULL,
-    run_date           DATE NOT NULL,           -- business date (Airflow execution date)
+    run_date           DATE NOT NULL,
 
     status             TEXT NOT NULL CHECK (status IN ('running', 'success', 'failed')),
     triggered_by       TEXT NOT NULL DEFAULT 'scheduler',
@@ -21,7 +17,7 @@ CREATE TABLE IF NOT EXISTS etl_pipeline_runs (
 
     created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
-    UNIQUE (pipeline_name, run_date)
+    UNIQUE (pipeline_name, dag_id, run_date)
 );
 
 CREATE INDEX IF NOT EXISTS idx_etl_pipeline_runs_name_date
@@ -35,7 +31,9 @@ CREATE TABLE IF NOT EXISTS etl_pipeline_steps (
     step_run_id        BIGSERIAL PRIMARY KEY,
     run_id             BIGINT NOT NULL REFERENCES etl_pipeline_runs(run_id) ON DELETE CASCADE,
 
-    step_name          TEXT NOT NULL,       -- bronze, silver, gold
+    dag_id             TEXT NOT NULL,
+    step_name          TEXT NOT NULL,
+
     status             TEXT NOT NULL CHECK (status IN ('running', 'success', 'failed', 'skipped')),
 
     started_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -46,7 +44,7 @@ CREATE TABLE IF NOT EXISTS etl_pipeline_steps (
 
     error_message      TEXT,
 
-    UNIQUE (run_id, step_name)
+    UNIQUE (run_id, dag_id, step_name)
 );
 
 CREATE INDEX IF NOT EXISTS idx_etl_pipeline_steps_run_id

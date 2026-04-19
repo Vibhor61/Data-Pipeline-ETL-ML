@@ -69,9 +69,9 @@ SilverSchema = pa.DataFrameSchema(
         "event_name_2": Column(pa.String, nullable=True),
         "event_type_2": Column(pa.String, nullable=True),
 
-        "snap_CA": Column(pa.Int, nullable=False, checks=Check.isin([0, 1])),
-        "snap_TX": Column(pa.Int, nullable=False, checks=Check.isin([0, 1])),
-        "snap_WI": Column(pa.Int, nullable=False, checks=Check.isin([0, 1])),
+        "snap_ca": Column(pa.Int, nullable=False, checks=Check.isin([0, 1])),
+        "snap_tx": Column(pa.Int, nullable=False, checks=Check.isin([0, 1])),
+        "snap_wi": Column(pa.Int, nullable=False, checks=Check.isin([0, 1])),
     },
 
     checks=[

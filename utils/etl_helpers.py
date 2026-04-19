@@ -65,7 +65,7 @@ def create_or_get_run(
         run_id = cur.fetchone()[0]
 
     conn.commit()
-    logger.info("Run upserted: run_id=%s pipeline=%s run_date=%s", run_id, pipeline_name, run_date)
+    logger.info("Run upserted: run_id=%s pipeline=%s dag_id=%s run_date=%s", run_id, pipeline_name, dag_id, run_date)
     return run_id
 
 
@@ -160,12 +160,11 @@ def start_step(
     Idempotent via ON CONFLICT on (run_id, step_name).
     """
     sql_q = """
-        INSERT INTO etl_pipeline_steps (run_id, dag_id, step_name, status)
-        VALUES (%s, %s, %s, 'running')
-        ON CONFLICT (run_id, step_name)
+        INSERT INTO etl_pipeline_steps (run_id, dag_id, step_name, status, started_at)
+        VALUES (%s, %s, %s, 'running', NOW())
+        ON CONFLICT (run_id, dag_id, step_name)
         DO UPDATE SET
             status = 'running',
-            started_at = NOW(),
             ended_at = NULL,
             input_rows = 0,
             output_rows = 0,
@@ -175,12 +174,13 @@ def start_step(
         cur.execute(sql_q, (run_id, dag_id, step_name))
 
     conn.commit()
-    logger.info("Step started: run_id=%s step=%s", run_id, step_name)
+    logger.info("Step started: run_id=%s dag_id=%s step=%s", run_id, dag_id, step_name)
 
 
 def finish_step(
     conn,
     run_id: int,
+    dag_id : str,
     step_name: str,
     status: str,
     input_rows: int = 0,
@@ -202,11 +202,11 @@ def finish_step(
             output_rows = %s,
             error_message = %s
         WHERE run_id = %s
-          AND step_name = %s;
+        AND dag_id = %s AND step_name = %s;
     """
 
     with conn.cursor() as cur:
-        cur.execute(sql_q, (status, input_rows, output_rows, error_message, run_id, step_name))
+        cur.execute(sql_q, (status, input_rows, output_rows, error_message, run_id, dag_id, step_name))
 
     conn.commit()
     logger.info("Step finished: run_id=%s step=%s status=%s", run_id, step_name, status)

@@ -17,7 +17,7 @@ Design principles:
 import pandera as pa
 from pandera import Column, Check
 
-VALID_EVENT_TYPES = {"Sporting", "Cultural", "National", "Religious", None}
+VALID_EVENT_TYPES = {"Sporting", "Cultural", "National", "Religious"}
 
 """
 Gold Storage Schema:
@@ -71,9 +71,9 @@ GoldStorageSchema = pa.DataFrameSchema(
         "event_type_2": Column(pa.String, nullable=True),
 
         # SNAP
-        "snap_CA": Column(pa.Int, nullable=False, checks=Check.isin([0, 1])),
-        "snap_TX": Column(pa.Int, nullable=False, checks=Check.isin([0, 1])),
-        "snap_WI": Column(pa.Int, nullable=False, checks=Check.isin([0, 1])),
+        "snap_ca": Column(pa.Int, nullable=False, checks=Check.isin([0, 1])),
+        "snap_tx": Column(pa.Int, nullable=False, checks=Check.isin([0, 1])),
+        "snap_wi": Column(pa.Int, nullable=False, checks=Check.isin([0, 1])),
 
         # Feature columns allowed but not strictly validated here
         "sales_lag_1": Column(pa.Float, nullable=True),
@@ -115,9 +115,10 @@ GoldStorageSchema = pa.DataFrameSchema(
         Check(lambda df: df["state_id"].isin(["CA", "TX", "WI"]).all()),
 
         Check(lambda df:
-            df["event_type_1"].isin(VALID_EVENT_TYPES).all()
-            and df["event_type_2"].isin(VALID_EVENT_TYPES).all()
-        ),
+            (df["event_type_1"].isna() | df["event_type_1"].isin(VALID_EVENT_TYPES)).all()
+            and
+            (df["event_type_2"].isna() | df["event_type_2"].isin(VALID_EVENT_TYPES)).all()
+        )
     ],
 
     strict=True,
