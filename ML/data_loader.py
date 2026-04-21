@@ -3,7 +3,7 @@ from psycopg2 import sql
 import pandas as pd
 import hashlib
 from dataclasses import dataclass
-from typing import Dict, Tuple, Any
+from typing import Dict, Tuple, Optional, Any
 from utils.db import get_connection
 import json
 import os

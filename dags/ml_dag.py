@@ -4,7 +4,14 @@ from datetime import datetime
 import os
 import pandas as pd
 from utils.db import get_connection
-from utils.ml_helpers import log_dataset, create_or_get_ml_pipeline_run
+from utils.ml_helpers import(
+    log_dataset, 
+    create_or_get_ml_pipeline_run,
+    get_run_id,
+    start_ml_stage,
+    finish_ml_stage,
+    update_ml_run_status
+    )
 
 from ML.train import train_pipeline
 from ML.data_loader import DataLoader,build_dataset
@@ -12,7 +19,8 @@ from ML.predict import predict_pipeline
 from ML.evaluate import evaluate_pipeline
 
 BASE_PATH = "/opt/airflow/data"
-
+DAG_ID = "retail_ml_dag"
+PIPELINE_NAME = "retail_pipeline"
 
 def task_create_run(**context):
 
