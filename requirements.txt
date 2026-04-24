@@ -2,3 +2,8 @@ apache-airflow==2.8.1
 psycopg2-binary
 pandas
 pandera
+mlflow
+numpy
+sklearn
+xgboost
+lightgbm

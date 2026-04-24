@@ -4,22 +4,16 @@ import tempfile
 import pandas as pd
 import logging
 import joblib
-import argparse
 
 import mlflow
 import mlflow.lightgbm
 import mlflow.xgboost
 
-from sklearn.preprocessing import LabelEncoder
-
-from utils.ml_helpers import log_prediction_run
-from utils.db import get_connection
-from preprocess import CATEGORICAL_COLS, preprocess, transform
+from preprocess import preprocess, transform
 
 logger = logging.getLogger(__name__)
 
 TARGET_COL = "sales"
-DATE = ["run_date"]
 
 
 def load_artifacts(mlflow_run_id: str):
@@ -37,84 +31,61 @@ def load_artifacts(mlflow_run_id: str):
     return encoders, features
 
 
-def load_model(run_id: str, best_model: str):
+def load_model(mlflow_run_id: str):
+
+    run = mlflow.get_run(mlflow_run_id)
+    best_model = run.data.params.get("best_model")
+
     if best_model == "lgb":
-        model_uri = f"runs:/{run_id}/lgb_model"
+        model_uri = f"runs:/{mlflow_run_id}/lgb_model"
         return mlflow.lightgbm.load_model(model_uri)
     elif best_model == "xgb":
-        model_uri = f"runs:/{run_id}/xgb_model"
+        model_uri = f"runs:/{mlflow_run_id}/xgb_model"
         return mlflow.xgboost.load_model(model_uri)
     else:
-        return None
+        raise ValueError(f"Unknown best_model: {best_model}")
     
 
-def predict_pipeline(df: pd.DataFrame, run_id: str, dataset_id: str):
+def predict_pipeline(test_path: str, run_id: str, dataset_id: str, train_mlflow_run_id: str):
 
-    logger.info("Prediction pipeline started for mlflfow_run_id=%s and dataset_id=%s", mlflow_run_id, dataset_id)
-    mlflow.set_tracking_uri("http://mlflow:5000")
+    logger.info("Prediction pipeline started for run_id=%s, train_mlflow_run_id=%s and dataset_id=%s", run_id, train_mlflow_run_id, dataset_id)
 
-    conn = get_connection()
-    try:
-        query = """
-            SELECT mlflow_run_id, model_name
-            FROM ml_runs
-            WHERE run_id = %s AND stage = 'train'
-        """
+    active_run = mlflow.active_run()
+    if active_run is None:
+        raise RuntimeError("No active MLflow run found in predict stage")
 
-        with conn.cursor() as cur:
-            cur.execute(query, (run_id,))
-            row = cur.fetchone()
-
-        if not row:
-            raise ValueError(f"No training record found for run_id={run_id}")
-
-        mlflow_run_id, best_model_name = row
-
-    finally:
-        conn.close()
     # Silent failure if trained on some dataset but evaluating on other without checking   
-    run = mlflow.get_run(mlflow_run_id)
-    trained_dataset_id = run.data.params.get("dataset_id")
+    run = mlflow.get_run(train_mlflow_run_id)
+    best_model_name = run.data.params.get("best_model")
 
+    trained_dataset_id = run.data.params.get("dataset_id")
     if trained_dataset_id != dataset_id:
         raise ValueError(
             f"Dataset mismatch: model trained on {trained_dataset_id}, "
             f"but prediction requested on {dataset_id}"
         )
+
+
+    test_df = pd.read_parquet(test_path)
+    test_df = preprocess(test_df)
+    X_test = test_df.drop(columns=[TARGET_COL])
+
+    encoders, features = load_artifacts(train_mlflow_run_id)
+    X_test = transform(X_test, encoders)
+
+    model = load_model(train_mlflow_run_id)
     
-    encoders, FEATURES = load_artifacts(mlflow_run_id)
-
-    best_model_name = run.data.params.get("best_model")
-    if best_model_name == "lgb":
-        model = mlflow.lightgbm.load_model(f"runs:/{mlflow_run_id}/best_model")
-    elif best_model_name == "xgb":
-        model = mlflow.xgboost.load_model(f"runs:/{mlflow_run_id}/best_model")
-    else:
-        raise ValueError(f"Unknown model type: {best_model_name}")
+    preds = model.predict(X_test[features])
     
-    df = preprocess(df)
-    df = transform(df, encoders)
+    pred_df = test_df.copy()
+    pred_df["prediction"] = preds
 
-    X = df[FEATURES]
+    pred_path = os.path.join(os.path.dirname(test_path), "predictions.parquet")
+    pred_df.to_parquet(pred_path, index=False)
 
-    preds = model.predict(X)
-    df["prediction"] = preds
+    mlflow.log_artifact(pred_path, artifact_path="predictions")
+    mlflow.log_metric("prediction_rows", len(pred_df))
 
-    logger.info("Prediction completed rows=%s", len(df))
-   
-    conn = None
-    try:
-        conn = get_connection()
-        log_prediction_run(
-            conn=conn,
-            run_id=run_id,
-            dataset_id=dataset_id,
-            mlflow_run_id=mlflow_run_id,
-            model_name=best_model_name,
-            prediction_count=len(df)
-        )
-    finally:
-        if conn:
-            conn.close()
+    logger.info("Prediction completed rows=%s", len(pred_df))
 
-    return df
+    return pred_path

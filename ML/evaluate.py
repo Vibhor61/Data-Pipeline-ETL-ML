@@ -1,14 +1,14 @@
 import numpy as np
 import pandas as pd
 import mlflow
-
-from sklearn.metrics import mean_squared_error, mean_absolute_error
+import os
+import tempfile
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 import logging
-from utils.ml_helpers import log_evaluation_metrics
-from utils.db import get_connection
 
 logger = logging.getLogger(__name__)
 
+TARGET_COL = "sales"
 def rmse(y_true, y_pred):
     return np.sqrt(mean_squared_error(y_true, y_pred))
 
@@ -20,120 +20,80 @@ def mape(y_true, y_pred):
 def wmape(y_true, y_pred):
     return np.sum(np.abs(y_true - y_pred)) / (np.sum(np.abs(y_true)) + 1e-8)
 
-# Slice key harcoded in version1
-def evaluate_pipeline(df: pd.DataFrame, run_id: str ,dataset_id: str):
 
-    logger.info("Prediction pipeline started for mlflow_run_id=%s and dataset_id=%s", mlflow_run_id, dataset_id)
-    mlflow.set_tracking_uri("http://mlflow:5000")
+def compute_slice_metrics(df: pd.DataFrame, group_col: str) -> pd.DataFrame:
+    metrics_df = (
+        df.groupby(group_col).apply(
+            lambda x: pd.Series({
+                "rmse": rmse(x[TARGET_COL], x["prediction"]),
+                "mae": mean_absolute_error(x[TARGET_COL], x["prediction"]),
+                "wmape": wmape(x[TARGET_COL], x["prediction"]),
+                "bias": (x[TARGET_COL] - x["prediction"]).mean(),
+                "rows": len(x)
+            })
+        )
+        .reset_index()
+    )
+    return metrics_df
 
-    conn = get_connection()
-    try:
-        query = """
-            SELECT mlflow_run_id
-            FROM ml_runs
-            WHERE run_id = %s AND stage = 'train'
-        """
 
-        with conn.cursor() as cur:
-            cur.execute(query, (run_id,))
-            row = cur.fetchone()
-
-        if not row:
-            raise ValueError(f"No training run found for run_id={run_id}")
-
-        mlflow_run_id = row[0]
-
-    finally:
-        conn.close()
-
-    # Silent failure if trained on some dataset but evaluating on other without checking
-    run = mlflow.get_run(mlflow_run_id)
-    trained_dataset_id = run.data.params.get("dataset_id")
-
+def evaluate_pipeline(pred_path: str, run_id: str ,dataset_id: str):
+    logger.info("Evaluation pipeline started for run_id=%s dataset_id=%s", run_id, dataset_id)
+    
+    active_run = mlflow.active_run()
+    if active_run is None:
+        raise RuntimeError("No active MLflow run found in predict stage")
+    
+    trained_dataset_id = active_run.data.params.get("dataset_id")
     if trained_dataset_id != dataset_id:
         raise ValueError(
-            f"Dataset mismatch: model trained on {trained_dataset_id}, "
-            f"but evaluation requested on {dataset_id}"
+            f"Dataset mismatch: trained on {trained_dataset_id}, "
+            f"evaluate requested on {dataset_id}"
+        )
+
+    pred_df = pd.read_parquet(pred_path)
+
+    required_cols = {"actual", "prediction"}
+    if not required_cols.issubset(pred_df.columns):
+        raise ValueError(
+            f"Predictions file must contain columns {required_cols}"
         )
     
-    if "sales" not in df.columns or "prediction" not in df.columns:
-        raise ValueError("Missing required columns: sales/prediction")
-    
-    y_true = df["sales"]
-    y_pred = df["prediction"]
-
-    test_rmse = rmse(y_true, y_pred)
-    test_mae = mean_absolute_error(y_true, y_pred)
-    test_mape = mape(y_true, y_pred)
-    test_wmape = wmape(y_true, y_pred)
-
-    df["errors"] = y_true - y_pred
-    df["abs_errors"] = np.abs(df["errors"])
-
-    error_mean = df["errors"].mean()
-    error_std = df["errors"].std()
+    y_true = pred_df["actual"]
+    y_pred = pred_df["prediction"]
 
     metrics = {
-        "rmse": test_rmse,
-        "mae": test_mae,
-        "mape": test_mape,
-        "wmape": test_wmape,
-        "error_mean": error_mean,
-        "error_std": error_std,
+        "test_rmse": rmse(y_true, y_pred),
+        "test_mae": mean_absolute_error(y_true, y_pred),
+        "test_mape": mape(y_true, y_pred),
+        "test_wmape": wmape(y_true, y_pred),
+        "test_r2": r2_score(y_true, y_pred)
     }
 
-    conn = None
-    try:
-        conn = get_connection()
-        log_evaluation_metrics(
-            conn=conn,
-            run_id=run_id,  
-            dataset_id=dataset_id,
-            model_version=mlflow_run_id,
-            metrics=metrics,
-            slice_key="overall",
-        )    
-        
-    finally:
-        if conn:
-            conn.close()
+    errors = y_true - y_pred
+    metrics["error_mean"] = errors.mean()
+    metrics["error_std"] = errors.std()
 
-    store_rmse = df.groupby("store_id").apply(
-        lambda x: rmse(x["sales"], x["prediction"])
-    )
+    mlflow.log_metrics(metrics)
 
-    worst_stores = store_rmse.sort_values(ascending=False).head(5)
-    best_stores = store_rmse.sort_values(ascending=True).head(5)
-    
-    dept_rmse = df.groupby("dept_id").apply(
-        lambda x: rmse(x["sales"], x["prediction"])
-    )
-    
-    worst_depts = dept_rmse.sort_values(ascending=False).head(5)
-    best_depts = dept_rmse.sort_values(ascending=True).head(5)
+    store_metrics = compute_slice_metrics(pred_df, STORE_COL)
+    dept_metrics = compute_slice_metrics(pred_df, DEPT_COL)
 
-    conn = get_connection()
-    try:
-        log_evaluation_run(
-            conn=conn,
-            run_id=run_id,
-            dataset_id=dataset_id,
-            mlflow_run_id=mlflow_run_id,
-            metrics=metrics,
-            slice_key="overall"
-        )
-    finally:
-        conn.close()
+    mlflow.log_metric("worst_store_wmape", store_metrics["wmape"].max())
+    mlflow.log_metric("worst_dept_wmape", dept_metrics["wmape"].max())
 
-    with mlflow.start_run(run_id=mlflow_run_id):
+    mlflow.log_metric("best_store_wmape", store_metrics["wmape"].min())
+    mlflow.log_metric("best_dept_wmape", dept_metrics["wmape"].min())
 
-        for k, v in metrics.items():
-            mlflow.log_metric(k, v)
+    with tempfile.TemporaryDirectory() as tmpdir:
 
-        mlflow.log_param("worst_stores", ",".join(map(str, worst_stores.index)))
-        mlflow.log_param("best_stores", ",".join(map(str, best_stores.index)))
+        store_path = os.path.join(tmpdir, "store_metrics.csv")
+        dept_path = os.path.join(tmpdir, "department_metrics.csv")
 
-        mlflow.log_param("worst_depts", ",".join(map(str, worst_depts.index)))
-        mlflow.log_param("best_depts", ",".join(map(str, best_depts.index)))
+        store_metrics.to_csv(store_path, index=False)
+        dept_metrics.to_csv(dept_path, index=False)
+
+        mlflow.log_artifact(store_path, artifact_path="slice_metrics")
+        mlflow.log_artifact(dept_path, artifact_path="slice_metrics")
 
     logger.info("Evaluation completed run_id=%s", run_id)

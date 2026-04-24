@@ -15,8 +15,6 @@ from sklearn.metrics import mean_squared_error
 import lightgbm as lgb
 import xgboost as xgb
 
-from utils.ml_helpers import log_training_run
-from utils.db import get_connection
 from preprocess import CATEGORICAL_COLS, preprocess, transform
 from validate import GoldMLSchema
 
@@ -29,22 +27,7 @@ DATE = ["run_date"]
 def rmse(y_true, y_pred):
     return np.sqrt(mean_squared_error(y_true, y_pred))
 
-
-def split_data(df:pd.DataFrame, meta: dict):
-
-    df = df.sort_values("run_date")
-    end_date = pd.to_datetime(meta["time_end"])
-
-    val_start  = end_date - pd.Timedelta(days=200)
-    test_start = end_date - pd.Timedelta(days=100)
-
-    train = df[df["run_date"] < val_start]
-    val   = df[(df["run_date"] >= val_start) & (df["run_date"] < test_start)]
-    test  = df[df["run_date"] >= test_start]
-
-    return train, val, test
-
-
+ 
 def fit_encoders(train):
     encoders = {}
     for col in CATEGORICAL_COLS:
@@ -96,7 +79,7 @@ def lgbm_train(X_train, y_train, X_val, y_val):
     return model, params
 
 
-def xg_boost_train(X_train, y_train, X_val, y_val):
+def xgboost_train(X_train, y_train, X_val, y_val):
     params = {
         "n_estimators":1000,
         "learning_rate":0.05,
@@ -119,125 +102,92 @@ def xg_boost_train(X_train, y_train, X_val, y_val):
     return model, params
  
 
-def train_pipeline(df: pd.DataFrame, run_id: str, dataset_id:str, meta: dict):
+def train_pipeline(train_df: pd.DataFrame, val_df: pd.DataFrame,run_id: str, dataset_id:str, mlflow_run_id: str):
 
     logger.info("Starting pipeline run for run_id=%s dataset_id=%s", run_id, dataset_id)
-    mlflow.set_tracking_uri("http://mlflow:5000")  # or localhost if outside docker
-    mlflow.set_experiment("retail_demand_forecasting")
+    
+    active_run = mlflow.active_run()
+    if active_run is None:
+        raise RuntimeError("No active MLflow run found in training stage")
+    
+    GoldMLSchema.validate(train_df, lazy=True)
+    GoldMLSchema.validate(val_df, lazy=True)
 
-    with mlflow.start_run(run_name=f"run_{run_id}") as run:
-        mlflow_run_id = run.info.run_id
+    train_df = preprocess(train_df.copy())
+    val_df = preprocess(val_df.copy())
 
-        df = df.copy()
-        df = preprocess(df)
+    if "run_date" in train_df.columns:
+        train_df = train_df.drop(columns=["run_date"])
+    if "run_date" in val_df.columns:
+        val_df = val_df.drop(columns=["run_date"])
 
-        train, val, test = split_data(df, meta)
-        for d in [train, val, test]:
-            if "run_date" in d.columns:
-                d.drop(columns=["run_date"], inplace=True)
-
-        encoders = fit_encoders(train)
+    encoders = fit_encoders(train_df)
         
-        train = transform(train, encoders)
-        val   = transform(val, encoders)
-        test  = transform(test, encoders)
+    train_df = transform(train_df, encoders)
+    val_df = transform(val_df, encoders)
+   
+    # FEATURES = [col for col in df.columns if col != TARGET_COL] Feature leakage if run_date and identifiers not dropped
+    FEATURES = [col for col in train_df.columns if col != TARGET_COL]    
+    X_train, y_train = train_df[FEATURES], train_df[TARGET_COL]
+    X_val, y_val = val_df[FEATURES], val_df[TARGET_COL]
 
-        # FEATURES = [col for col in df.columns if col != TARGET_COL] Feature leakage if run_date and identifiers not dropped
-        FEATURES = [col for col in train.columns if col != TARGET_COL]
 
-        mlflow.log_param("mlflow_run_id", mlflow_run_id)
-        mlflow.log_param("airflow_run_id", run_id)
-        mlflow.log_param("dataset_id", dataset_id)
-        mlflow.log_param("feature_version", meta["feature_version"])
-        mlflow.log_param("time_start", meta["time_start"])
-        mlflow.log_param("time_end", meta["time_end"])
+    mlflow.log_param("run_id", run_id)
+    mlflow.log_param("dataset_id", dataset_id)
+    mlflow.log_param("mlflow_run_id", mlflow_run_id)
+    mlflow.log_param("num_features", len(FEATURES))
 
-        mlflow.log_param("num_features", len(FEATURES))
-        mlflow.log_param("train_rows", len(train))
-        mlflow.log_param("val_rows", len(val))
-        mlflow.log_param("test_rows", len(test))
+    baseline_pred = baseline_train(val_df)
+    baseline_val_rmse = rmse(y_val, baseline_pred)
+    mlflow.log_metric("baseline_val_rmse", baseline_val_rmse)
         
-        X_train, y_train = train[FEATURES], train[TARGET_COL]
-        X_val, y_val     = val[FEATURES], val[TARGET_COL]
-        X_test, y_test   = test[FEATURES], test[TARGET_COL]
+    lgb_model, lgb_params = lgbm_train(X_train, y_train, X_val, y_val)
+    lgb_val_pred = lgb_model.predict(X_val)
+    lgb_rmse = rmse(y_val, lgb_val_pred)
 
-        baseline_pred = baseline_train(val)
-        baseline_val_rmse = rmse(y_val, baseline_pred)
-        mlflow.log_metric("baseline_val_rmse", baseline_val_rmse)
+    mlflow.log_metric("lgb_val_rmse", lgb_rmse)
+    mlflow.lightgbm.log_model(lgb_model, "lgb_model")
+    mlflow.log_params({f"lgb_{k}": v for k, v in lgb_params.items()})
+
+    xgb_model, xgb_params = xgboost_train(X_train, y_train, X_val, y_val)
+    xgb_val_pred = xgb_model.predict(X_val)
+    xgb_rmse = rmse(y_val, xgb_val_pred)
+
+    mlflow.log_metric("xgb_val_rmse", xgb_rmse)
+    mlflow.xgboost.log_model(xgb_model, "xgb_model")
+    mlflow.log_params({f"xgb_{k}": v for k, v in xgb_params.items()})
+
+    best_model_name = "lgb" if lgb_rmse < xgb_rmse else "xgb"
+    mlflow.log_param("best_model", best_model_name)
+
+    best_model = lgb_model if best_model_name == "lgb" else xgb_model
+    mlflow.log_metric("best_val_rmse", min(lgb_rmse, xgb_rmse))
+
+    if best_model_name == "lgb":
+        mlflow.lightgbm.log_model(best_model, "best_model") 
+    else:
+        mlflow.xgboost.log_model(best_model, "best_model")
         
-        lgb_model, lgb_params = lgbm_train(X_train, y_train, X_val, y_val)
-        val_lgb_pred = lgb_model.predict(X_val)
-        lgb_val_rmse = rmse(y_val, val_lgb_pred)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        enc_path = os.path.join(tmpdir, "encoders.pkl")
+        feat_path = os.path.join(tmpdir, "features.json")
 
-        mlflow.log_metric("lgb_val_rmse", lgb_val_rmse)
-        mlflow.lightgbm.log_model(lgb_model, "lgb_model")
-        mlflow.log_params({f"lgb_{k}": v for k, v in lgb_params.items()})
+        joblib.dump(encoders, enc_path)
 
-        xgb_model, xgb_params = xg_boost_train(X_train, y_train, X_val, y_val)
-        val_xgb_pred = xgb_model.predict(X_val)
-        xgb_val_rmse = rmse(y_val, val_xgb_pred)
+        with open(feat_path, "w") as f:
+            json.dump(FEATURES, f)
 
-        mlflow.log_metric("xgb_val_rmse", xgb_val_rmse)
-        mlflow.xgboost.log_model(xgb_model, "xgb_model")
-        mlflow.log_params({f"xgb_{k}": v for k, v in xgb_params.items()})
+        mlflow.log_artifact(enc_path)
+        mlflow.log_artifact(feat_path)
 
-        metrics = {
-            "lgb": lgb_val_rmse,
-            "xgb": xgb_val_rmse
-        }
-
-        best_model_name = min(metrics, key=metrics.get)
-        mlflow.log_param("best_model", best_model_name)
-
-        if best_model_name == "lgb":
-            best_model = lgb_model
-            test_pred = lgb_model.predict(X_test)
-            mlflow.lightgbm.log_model(best_model, "best_model")
-
-        else:
-            best_model = xgb_model
-            test_pred = xgb_model.predict(X_test)
-            mlflow.xgboost.log_model(best_model, "best_model")
-
-        test_rmse = rmse(y_test, test_pred)
-        mlflow.log_metric("test_rmse", test_rmse)
-        
-        with tempfile.TemporaryDirectory() as tmpdir:
-            enc_path = os.path.join(tmpdir, "encoders.pkl")
-            feat_path = os.path.join(tmpdir, "features.json")
-
-            joblib.dump(encoders, enc_path)
-
-            with open(feat_path, "w") as f:
-                json.dump(FEATURES, f)
-
-            mlflow.log_artifact(enc_path)
-            mlflow.log_artifact(feat_path)
-
-        logger.info(
-            "Training completed run_id=%s dataset_id=%s mlflow_run_id=%s",
-            run_id,
-            dataset_id,
-            mlflow_run_id
-        )
-
-        conn = None 
-        try: 
-            conn = get_connection()
-            log_training_run(
-                conn=conn,
-                run_id=run_id,
-                dataset_id=dataset_id,
-                model_name=best_model_name,
-                mlflow_run_id=mlflow_run_id,
-            )  
-        finally:
-            if conn:
-                conn.close()
+    logger.info("Training completed run_id=%s dataset_id=%s mlflow_run_id=%s", run_id, dataset_id, mlflow_run_id)
 
 
-def main(run_id: str, dataset_id: str, dataset_path: str, meta: dict):
+def train_main(run_id: str, dataset_id: str, train_path: str, val_path: str, mlflow_run_id: str):
+
     logger.info("Main entry: run_id=%s dataset_id=%s", run_id, dataset_id)
-    df = pd.read_parquet(dataset_path)
-    GoldMLSchema.validate(df, lazy=True)
-    train_pipeline(df, run_id, dataset_id, meta)
+
+    train_df = pd.read_parquet(train_path)
+    val_df = pd.read_parquet(val_path)
+
+    train_pipeline(train_df, val_df, run_id, dataset_id, mlflow_run_id)
