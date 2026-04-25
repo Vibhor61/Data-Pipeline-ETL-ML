@@ -1,3 +1,18 @@
+"""
+ML Preprocessing Utilities
+
+Prepares ML feature data for training and inference by cleaning, encoding,
+and imputing missing values.
+
+Input: raw gold feature dataset
+Output: transformed feature-ready dataset
+
+Core design principles:
+- categorical features are label encoded consistently
+- missing lags and rolling features are forward-filled and imputed
+- dataset identifiers are preserved through feature generation
+"""
+
 import pandas as pd
 from typing import Dict
 from sklearn.preprocessing import LabelEncoder
@@ -23,6 +38,13 @@ DROP_COLS = [
 ]
 
 def preprocess(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Preprocess the dataset in preparation for model training or inference.
+    Args:
+        df (pd.DataFrame): input gold feature dataset
+    Returns:
+        pd.DataFrame: cleaned and imputed dataset
+    """
     df = df.copy()
 
     df = df.sort_values(["item_id", "store_id", "run_date"])
@@ -56,6 +78,14 @@ def preprocess(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def transform(df: pd.DataFrame, encoders: Dict[str, LabelEncoder]) -> pd.DataFrame:
+    """
+    Apply label encoding to categorical features using pretrained encoders.
+    Args:
+        df (pd.DataFrame): dataset to transform
+        encoders (Dict[str, LabelEncoder]): fitted label encoders
+    Returns:
+        pd.DataFrame: encoded dataset ready for model input
+    """
     df = df.copy()
 
     for col, le in encoders.items():

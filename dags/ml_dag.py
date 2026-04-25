@@ -1,10 +1,8 @@
 from airflow import DAG
 from airflow.operators.python import PythonOperator
 from datetime import datetime
-import os
 import logging
 import mlflow
-import pandas as pd
 from utils.db import get_connection
 from utils.ml_helpers import(
     log_dataset, 
@@ -12,7 +10,8 @@ from utils.ml_helpers import(
     get_etl_run_id,
     start_ml_stage,
     finish_ml_stage,
-    update_ml_pipeline_status
+    update_ml_pipeline_status,
+    atomic_write_parquet
 )
 
 from ML.train import train_main
@@ -31,8 +30,97 @@ MLFLOW_EXPERIMENT = "retail_demand_forecasting"
 mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
 mlflow.set_experiment(MLFLOW_EXPERIMENT)
 
+def run_stage(
+    *,
+    stage: str,
+    run_id: str,
+    dataset_id: str,
+    parent_mlflow_run_id: str,
+    source_mlflow_run_id: str | None,
+    stage_fn,
+    stage_kwargs: dict
+):
+    """
+    Generic ML stage runner.
+
+    Responsibilities:
+    - starts MLflow run
+    - records stage start metadata
+    - executes stage function
+    - records success/failure metadata
+    - updates pipeline failure state if stage fails
+
+    Returns:
+        dict with:
+        {
+            "mlflow_run_id": str,
+            "result": Any
+        }
+    """
+    ml_run_id = f"{run_id}_{stage}"
+    mlflow_run_id = None
+
+    try:
+        with mlflow.start_run(run_name=ml_run_id) as run:
+            mlflow_run_id = run.info.run_id
+
+            mlflow.set_tag("parent_run_id", parent_mlflow_run_id)
+            mlflow.set_tag("stage", stage)
+
+            with get_connection() as conn:
+                start_ml_stage(
+                    conn=conn,
+                    ml_run_id=ml_run_id,
+                    run_id=run_id,
+                    dataset_id=dataset_id,
+                    stage=stage,
+                    mlflow_run_id=mlflow_run_id,
+                    source_mlflow_run_id=source_mlflow_run_id
+                )
+
+            result = stage_fn(**stage_kwargs)
+
+            with get_connection() as conn:
+                finish_ml_stage(
+                    conn=conn,
+                    run_id=run_id,
+                    dataset_id=dataset_id,
+                    stage=stage,
+                    status="success",
+                    mlflow_run_id=mlflow_run_id
+                )
+
+            return {
+                "mlflow_run_id": mlflow_run_id,
+                "result": result
+            }
+
+    except Exception as e:
+        with get_connection() as conn:
+            finish_ml_stage(
+                conn=conn,
+                run_id=run_id,
+                dataset_id=dataset_id,
+                stage=stage,
+                status="failed",
+                mlflow_run_id=mlflow_run_id,
+                error_message=str(e)
+            )
+
+            update_ml_pipeline_status(
+                conn=conn,
+                run_id=run_id,
+                status="failed"
+            )
+
+        raise
+
 
 def task_create_run(**context):
+    """
+    Creates or retrieves the ML pipeline run record.
+    Starts an MLflow parent run and returns run metadata for downstream tasks.
+    """
 
     run_date = context["ds"]
 
@@ -65,6 +153,10 @@ def task_create_run(**context):
 
 
 def task_build_dataset(**context):
+    """
+    Builds train/validation/test datasets and writes them to parquet.
+    Stores dataset metadata in the ML metadata table and returns context.
+    """
 
     ti = context["ti"]
     run_context = ti.xcom_pull(task_ids="create_run")
@@ -76,14 +168,15 @@ def task_build_dataset(**context):
         run_date=run_date,
         table_name="gold_table",
         date_column="run_date",
-        feature_version="v1"
+        feature_version="v1",
+        output_dir="/opt/airflow/data/datasets"
     )
 
     datasets, meta = build_dataset_cfg(cfg)
 
-    datasets["train"].to_parquet(meta["paths"]["train"], index=False)
-    datasets["val"].to_parquet(meta["paths"]["val"], index=False)
-    datasets["test"].to_parquet(meta["paths"]["test"], index=False)
+    atomic_write_parquet(datasets["train"], meta["paths"]["train"])
+    atomic_write_parquet(datasets["val"], meta["paths"]["val"])
+    atomic_write_parquet(datasets["test"], meta["paths"]["test"])
 
     with get_connection() as conn:
         log_dataset(conn, run_id, meta)
@@ -103,204 +196,99 @@ def task_build_dataset(**context):
 
 
 def task_train(**context):
+    """
+    Runs model training with MLflow tracking.
+    Records the train stage metadata and returns the train MLflow run id.
+    """
     
     ti = context["ti"]
     dataset_context = ti.xcom_pull(task_ids="build_dataset")
-    run_id = dataset_context["run_id"]
-    dataset_id = dataset_context["dataset_id"]
 
-    train_path = dataset_context["train_path"]
-    val_path = dataset_context["val_path"]
-
-    ml_run_id = f"{run_id}_train"
-
-    try:
-        with mlflow.start_run(run_name=ml_run_id) as run:
-            mlflow_run_id = run.info.run_id
-            
-            # Link to parent for traceability
-            mlflow.set_tag("parent_run_id", dataset_context["parent_mlflow_run_id"])
-            
-            with get_connection() as conn:
-                if conn is None:
-                    raise RuntimeError("Database connection failed")
-                
-                start_ml_stage(
-                    conn=conn,
-                    ml_run_id=ml_run_id,
-                    run_id=run_id,
-                    dataset_id=dataset_id,
-                    stage="train",
-                    mlflow_run_id=mlflow_run_id
-                )
-            
-
-            train_main(
-                run_id,
-                dataset_id,
-                train_path,
-                val_path,
-                mlflow_run_id
-            )
-            
-            with get_connection() as conn:
-                if conn is None:
-                    raise RuntimeError("Database connection failed")
-                finish_ml_stage(
-                    conn=conn,
-                    run_id=run_id,
-                    dataset_id=dataset_id,
-                    stage="train",
-                    status="success",
-                    mlflow_run_id=mlflow_run_id
-                )
-        
-        logger.info("Training completed: mlflow_run_id=%s", mlflow_run_id)
-        
-        return {
-            **dataset_context,
-            "train_mlflow_run_id": mlflow_run_id
+    result = run_stage(
+        stage="train",
+        run_id=dataset_context["run_id"],
+        dataset_id=dataset_context["dataset_id"],
+        parent_mlflow_run_id=dataset_context["parent_mlflow_run_id"],
+        source_mlflow_run_id=None,
+        stage_fn=train_main,
+        stage_kwargs={
+            "run_id": dataset_context["run_id"],
+            "dataset_id": dataset_context["dataset_id"],
+            "train_path": dataset_context["train_path"],
+            "val_path": dataset_context["val_path"]
         }
+    )
 
-    except Exception as e:
-        with get_connection() as conn:
-            finish_ml_stage(
-                conn=conn,
-                run_id=run_id,
-                dataset_id=dataset_id,
-                stage="train",
-                status="failed",
-                mlflow_run_id=mlflow_run_id,
-                error_message=str(e)
-            )
-        raise
+    return {
+        **dataset_context,
+        "train_mlflow_run_id": result["mlflow_run_id"]
+    }
 
 
 
 def task_predict(**context):
+    """
+    Runs model prediction and records the predict stage metadata.
+    Returns the prediction file path for downstream evaluation.
+    """
    
     ti = context["ti"]
     dataset_context = ti.xcom_pull(task_ids="train")
 
-    run_id = dataset_context["run_id"]
-    dataset_id = dataset_context["dataset_id"]
-    test_path = dataset_context["test_path"]
-
-    ml_run_id = f"{run_id}_predict"
-
-    conn = get_connection()
-    try:
-        with mlflow.start_run(run_name=ml_run_id) as run:
-            mlflow_run_id = run.info.run_id
-
-            mlflow.set_tag("parent_run_id", dataset_context["parent_mlflow_run_id"])
-            
-            start_ml_stage(
-                conn=conn,
-                ml_run_id=ml_run_id,
-                run_id=run_id,
-                dataset_id=dataset_id,
-                stage="predict",
-                mlflow_run_id=mlflow_run_id
-            )
-
-            pred_path = predict_pipeline(
-                test_df_path=test_path,
-                run_id=run_id,
-                dataset_id=dataset_id,
-                train_mlflow_run_id=dataset_context["train_mlflow_run_id"]
-            )
-
-            finish_ml_stage(
-                conn=conn,
-                run_id=run_id,
-                dataset_id=dataset_id,
-                stage="predict",
-                status="success",
-                mlflow_run_id=mlflow_run_id
-            )
-
-    except Exception as e:
-        finish_ml_stage(
-            conn=conn,
-            run_id=run_id,
-            dataset_id=dataset_id,
-            stage="predict",
-            status="failed",
-            mlflow_run_id=mlflow_run_id,
-            error_message=str(e)
-        )
-        raise
-
-    finally:
-        conn.close()
+    result = run_stage(
+        stage="predict",
+        run_id=dataset_context["run_id"],
+        dataset_id=dataset_context["dataset_id"],
+        parent_mlflow_run_id=dataset_context["parent_mlflow_run_id"],
+        source_mlflow_run_id=dataset_context["train_mlflow_run_id"],
+        stage_fn=predict_pipeline,
+        stage_kwargs={
+            "test_path": dataset_context["test_path"],
+            "run_id": dataset_context["run_id"],
+            "dataset_id": dataset_context["dataset_id"],
+            "train_mlflow_run_id": dataset_context["train_mlflow_run_id"]
+        }
+    )
 
     return {
-        **dataset_context, 
-        "pred_path":pred_path 
+        **dataset_context,
+        "pred_path": result["result"],
+        "pred_mlflow_run_id": result["mlflow_run_id"]
     }
 
+
 def task_evaluate(**context):
+    """
+    Evaluates predictions and records the evaluate stage metadata.
+    Returns the same dataset context after evaluation completes.
+    """
 
     ti = context["ti"]
     dataset_context = ti.xcom_pull(task_ids="predict")
 
-    run_id = dataset_context["run_id"]
-    dataset_id = dataset_context["dataset_id"]
-    pred_path = dataset_context["pred_path"]
-
-    ml_run_id = f"{run_id}_evaluate"
-
-    conn = get_connection()
-    try:
-        with mlflow.start_run(run_name=ml_run_id) as run:
-            mlflow_run_id = run.info.run_id
-            
-            mlflow.set_tag("parent_run_id", dataset_context["parent_mlflow_run_id"])
-            
-            start_ml_stage(
-                conn=conn,
-                ml_run_id=ml_run_id,
-                run_id=run_id,
-                dataset_id=dataset_id,
-                stage="evaluate",
-                mlflow_run_id=mlflow_run_id
-            )
-
-            evaluate_pipeline(
-                test_df_path=pred_path,
-                run_id=run_id,
-                dataset_id=dataset_id
-            )
-
-            finish_ml_stage(
-                conn=conn,
-                run_id=run_id,
-                dataset_id=dataset_id,
-                stage="evaluate",
-                status="success",
-                mlflow_run_id=mlflow_run_id
-            )
-
-    except Exception as e:
-        finish_ml_stage(
-            conn=conn,
-            run_id=run_id,
-            dataset_id=dataset_id,
-            stage="evaluate",
-            status="failed",
-            mlflow_run_id=mlflow_run_id,
-            error_message=str(e)
-        )
-        raise
-
-    finally:
-        conn.close()
+    run_stage(
+        stage="evaluate",
+        run_id=dataset_context["run_id"],
+        dataset_id=dataset_context["dataset_id"],
+        parent_mlflow_run_id=dataset_context["parent_mlflow_run_id"],
+        source_mlflow_run_id=dataset_context["pred_mlflow_run_id"],
+        stage_fn=evaluate_pipeline,
+        stage_kwargs={
+            "pred_path": dataset_context["pred_path"],
+            "run_id": dataset_context["run_id"],
+            "dataset_id": dataset_context["dataset_id"],
+            "train_mlflow_run_id": dataset_context["train_mlflow_run_id"]
+        }
+    )
 
     return dataset_context
 
 
 def task_finalize(**context):
+    """
+    Marks the ML pipeline run as successful in metadata.
+    Finalizes the ML workflow for the current run.
+    """
 
     ti = context["ti"]
     dataset_context = ti.xcom_pull(task_ids="evaluate")

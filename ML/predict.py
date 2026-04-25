@@ -1,3 +1,17 @@
+"""
+ML Prediction Pipeline
+
+Loads trained artifacts and generates predictions for a test dataset.
+
+Input: trained MLflow run artifacts and test dataset
+Output: prediction parquet file and MLflow prediction artifact
+
+Core design principles:
+- prediction artifacts are loaded from the same MLflow run as training
+- input dataset integrity checks guard against mismatched schemas
+- predictions are persisted and logged for reproducibility
+"""
+
 import os
 import json
 import tempfile
@@ -17,6 +31,13 @@ TARGET_COL = "sales"
 
 
 def load_artifacts(mlflow_run_id: str):
+    """
+    Download model artifacts from a completed MLflow run.
+    Args:
+        mlflow_run_id (str): MLflow run identifier
+    Returns:
+        tuple: loaded encoders dictionary and feature list
+    """
     client = mlflow.tracking.MlflowClient()
     
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -32,6 +53,15 @@ def load_artifacts(mlflow_run_id: str):
 
 
 def load_model(mlflow_run_id: str):
+    """
+    Load the best trained model from the given MLflow run.
+    Args:
+        mlflow_run_id (str): MLflow run identifier
+    Returns:
+        object: loaded model instance
+    Raises:
+        ValueError: if the best_model parameter is missing or unknown
+    """
 
     run = mlflow.get_run(mlflow_run_id)
     best_model = run.data.params.get("best_model")
@@ -47,6 +77,19 @@ def load_model(mlflow_run_id: str):
     
 
 def predict_pipeline(test_path: str, run_id: str, dataset_id: str, train_mlflow_run_id: str):
+    """
+    Run the model prediction pipeline and log prediction artifacts.
+    Args:
+        test_path (str): path to test dataset parquet file
+        run_id (str): prediction pipeline run identifier
+        dataset_id (str): expected dataset identifier used at training time
+        train_mlflow_run_id (str): MLflow run id for the trained model
+    Returns:
+        str: path to the generated prediction parquet file
+    Raises:
+        RuntimeError: when no active MLflow run exists
+        ValueError: when dataset mismatch or model artifacts are invalid
+    """
 
     logger.info("Prediction pipeline started for run_id=%s, train_mlflow_run_id=%s and dataset_id=%s", run_id, train_mlflow_run_id, dataset_id)
 
@@ -79,6 +122,7 @@ def predict_pipeline(test_path: str, run_id: str, dataset_id: str, train_mlflow_
     
     pred_df = test_df.copy()
     pred_df["prediction"] = preds
+    pred_df["actual"] = pred_df[TARGET_COL]
 
     pred_path = os.path.join(os.path.dirname(test_path), "predictions.parquet")
     pred_df.to_parquet(pred_path, index=False)

@@ -1,3 +1,17 @@
+"""
+ML Training Pipeline
+
+Trains and logs both LightGBM and XGBoost models on gold feature datasets.
+
+Input: train and validation parquet datasets
+Output: logged MLflow models, evaluation metrics, and artifact artifacts
+
+Core design principles:
+- model validation uses a held-out validation set
+- encoders are persisted alongside feature definitions
+- best model selection is based on validation RMSE
+"""
+
 import os
 import json
 import tempfile
@@ -25,10 +39,25 @@ DATE = ["run_date"]
 
 
 def rmse(y_true, y_pred):
+    """
+    Compute root mean squared error for model evaluation.
+    Args:
+        y_true: true target values
+        y_pred: predicted target values
+    Returns:
+        float: RMSE score
+    """
     return np.sqrt(mean_squared_error(y_true, y_pred))
 
  
 def fit_encoders(train):
+    """
+    Fit label encoders for categorical features.
+    Args:
+        train (pd.DataFrame): training dataset containing categorical columns
+    Returns:
+        Dict[str, LabelEncoder]: fitted encoders for each categorical feature
+    """
     encoders = {}
     for col in CATEGORICAL_COLS:
         le = LabelEncoder()
@@ -40,10 +69,27 @@ def fit_encoders(train):
 
 
 def baseline_train(df:pd.DataFrame):
+    """
+    Build a simple baseline prediction using the 7-day lag.
+    Args:
+        df (pd.DataFrame): dataset containing lag features
+    Returns:
+        pd.Series: baseline predictions from sales_lag_7
+    """
     return df["sales_lag_7"]
 
 
 def lgbm_train(X_train, y_train, X_val, y_val):
+    """
+    Train a LightGBM regression model with early stopping.
+    Args:
+        X_train: training features
+        y_train: training labels
+        X_val: validation features
+        y_val: validation labels
+    Returns:
+        tuple: trained LightGBM model and parameter dictionary
+    """
     train_data = lgb.Dataset(
         X_train,
         label=y_train,
@@ -80,6 +126,16 @@ def lgbm_train(X_train, y_train, X_val, y_val):
 
 
 def xgboost_train(X_train, y_train, X_val, y_val):
+    """
+    Train an XGBoost regression model with early stopping.
+    Args:
+        X_train: training features
+        y_train: training labels
+        X_val: validation features
+        y_val: validation labels
+    Returns:
+        tuple: trained XGBoost model and parameter dictionary
+    """
     params = {
         "n_estimators":1000,
         "learning_rate":0.05,
@@ -103,6 +159,19 @@ def xgboost_train(X_train, y_train, X_val, y_val):
  
 
 def train_pipeline(train_df: pd.DataFrame, val_df: pd.DataFrame,run_id: str, dataset_id:str, mlflow_run_id: str):
+    """
+    Execute the end-to-end training pipeline and log results to MLflow.
+    Args:
+        train_df (pd.DataFrame): training dataset
+        val_df (pd.DataFrame): validation dataset
+        run_id (str): pipeline execution identifier
+        dataset_id (str): dataset fingerprint identifier
+        mlflow_run_id (str): active MLflow run identifier
+    Returns:
+        None
+    Raises:
+        RuntimeError: when no active MLflow run exists
+    """
 
     logger.info("Starting pipeline run for run_id=%s dataset_id=%s", run_id, dataset_id)
     
@@ -184,6 +253,17 @@ def train_pipeline(train_df: pd.DataFrame, val_df: pd.DataFrame,run_id: str, dat
 
 
 def train_main(run_id: str, dataset_id: str, train_path: str, val_path: str, mlflow_run_id: str):
+    """
+    Main entry point for training using parquet dataset files.
+    Args:
+        run_id (str): pipeline execution identifier
+        dataset_id (str): dataset fingerprint identifier
+        train_path (str): path to training parquet file
+        val_path (str): path to validation parquet file
+        mlflow_run_id (str): active MLflow run identifier
+    Returns:
+        None
+    """
 
     logger.info("Main entry: run_id=%s dataset_id=%s", run_id, dataset_id)
 

@@ -1,14 +1,24 @@
 import logging
-from datetime import datetime
-from psycopg2 import sql
+from datetime import datetime, timezone
 from typing import Optional
+import os
 
 logger = logging.getLogger(__name__)
 
+def atomic_write_parquet(df, final_path: str):
+    "Making overwrite atomic to remove any mid failure discrepancies"
+    temp_path = final_path + ".tmp"
+    df.to_parquet(temp_path, index=False)
+    os.replace(temp_path, final_path)
+
 
 def get_etl_run_id(conn, run_date: str):
+    """
+    Returns the latest ETL pipeline run_id for a given run_date.
+    Raises ValueError if no run_id exists.
+    """
     sql = """
-        SELECT run_id FROM etl_pipeline_runs " 
+        SELECT run_id FROM etl_pipeline_runs 
         WHERE run_date = %s
         ORDER BY created_at DESC
         LIMIT 1;
@@ -29,6 +39,10 @@ def create_or_get_ml_pipeline_run(
     run_date: str,
     triggered_by: str = "scheduler",
 ):
+    """
+    Creates or resets logical pipeline run for this run_id.
+    Idempotent via ON CONFLICT; ensures the run is marked running.
+    """
     query = """
     INSERT INTO ml_pipeline_runs (
         run_id,
@@ -61,6 +75,10 @@ def update_ml_pipeline_status(
     status: str,  
     error_message: Optional[str] = None,
 ):
+    """
+    Updates ML pipeline run status (running, success, failed).
+    Raises ValueError for invalid statuses.
+    """
     if status not in ("running", "success", "failed"):
         raise ValueError("Invalid status")
 
@@ -74,7 +92,9 @@ def update_ml_pipeline_status(
 
     with conn.cursor() as cur:
         cur.execute(query, (status, error_message, run_id))
-
+        if cur.rowcount == 0:
+            raise ValueError(f"No ml_pipeline_runs found for run_id={run_id}")
+        
     conn.commit()
 
     logger.info("ML pipeline updated: run_id=%s status=%s",run_id,status)
@@ -87,7 +107,12 @@ def start_ml_stage(
     dataset_id: str,
     stage: str,
     mlflow_run_id: str,
+    source_mlflow_run_id: str = None
 ):
+    """
+    Marks an ML stage as running.
+    Idempotent via ON CONFLICT on (run_id, dataset_id, stage).
+    """
     query = """
     INSERT INTO ml_runs (
         ml_run_id,
@@ -95,19 +120,21 @@ def start_ml_stage(
         dataset_id,
         stage,
         mlflow_run_id,
+        source_mlflow_run_id,
         status,
         created_at
     )
-    VALUES (%s, %s, %s, %s, %s, 'running', NOW())
+    VALUES (%s, %s, %s, %s, %s, %s, 'running', NOW())
     ON CONFLICT (run_id, dataset_id, stage) 
     DO UPDATE SET
         status = 'running',
         mlflow_run_id = EXCLUDED.mlflow_run_id,
+        source_mlflow_run_id = EXCLUDED.source_mlflow_run_id,
         ended_at = NULL,
         error_message = NULL;
     """
     with conn.cursor() as cur:
-        cur.execute(query, (ml_run_id, run_id, dataset_id, stage, mlflow_run_id))
+        cur.execute(query, (ml_run_id, run_id, dataset_id, stage, mlflow_run_id, source_mlflow_run_id))
 
     conn.commit()
     logger.info("ML stage started: run_id=%s stage=%s mlflow_run_id=%s", run_id, stage, mlflow_run_id)
@@ -122,22 +149,32 @@ def finish_ml_stage(
     mlflow_run_id: str,
     error_message: Optional[str] = None,
 ):
+    """
+    Marks an ML stage as finished with success or failure.
+    Raises ValueError if status is not success or failed.
+    """
     if status not in ("success", "failed"):
         raise ValueError("Invalid status")
     
     sql = """
         UPDATE ml_runs
-        SET status = %s, error_message = %s, ended_at = NOW()
-        WHERE run_id = %s AND dataset_id = %s AND stage = %s AND mlflow_run_id = %s;
+        SET status = %s, error_message = %s, mlflow_run_id = %s, ended_at = NOW()
+        WHERE run_id = %s AND dataset_id = %s AND stage = %s;
     """
     with conn.cursor() as cur:
-        cur.execute(sql, (status, error_message, run_id, dataset_id, stage, mlflow_run_id))
+        cur.execute(sql, (status, error_message, mlflow_run_id, run_id, dataset_id, stage))
+        if cur.rowcount == 0:
+            raise ValueError(f"No ml_runs row found for run_id={run_id}, dataset_id={dataset_id}, stage={stage}")
+    
     conn.commit()
     logger.info("ML stage finished: run_id=%s stage=%s mlflow_run_id=%s status=%s", run_id, stage, mlflow_run_id, status)
 
 
-
 def log_dataset(conn, run_id: str, meta: dict):
+    """
+    Insert or overwrite dataset metadata for deterministic dataset_id.
+    Ensures metadata stays aligned with overwritten parquet files.
+    """
     query = """
         INSERT INTO ml_dataset (
             dataset_id,
@@ -212,7 +249,7 @@ def log_dataset(conn, run_id: str, meta: dict):
         "feature_hash": meta["feature_hash"],
         "schema_hash": meta["schema_hash"],
 
-        "created_at": datetime.now(datetime.timezone.utc)
+        "created_at": datetime.now(timezone.utc)
     }
 
     with conn.cursor() as cur:

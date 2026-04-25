@@ -1,9 +1,10 @@
 apache-airflow==2.8.1
+apache-airflow-providers-postgres
 psycopg2-binary
 pandas
+numpy
 pandera
 mlflow
-numpy
-sklearn
+scikit-learn
 xgboost
 lightgbm

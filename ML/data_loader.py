@@ -1,3 +1,17 @@
+"""
+Gold ML Data Loader
+
+Builds training, validation, and test datasets from ETL gold output.
+
+Input: validated ETL gold table and pipeline run metadata
+Output: partitioned datasets, dataset metadata, and stable dataset hashes
+
+Core design principles:
+- dataset provenance is tracked through ETL run validation
+- train/val/test splits are derived from run_date ordering
+- schema and feature version hashes enable reproducible datasets
+"""
+
 import logging
 from psycopg2 import sql
 import pandas as pd
@@ -10,7 +24,7 @@ import os
 
 logger = logging.getLogger(__name__)
 
-BASE_DATE = pd.to_datetime("2011-29-01")
+BASE_DATE = pd.to_datetime("2011-01-29")
 
 @dataclass
 class DataLoader:
@@ -27,6 +41,17 @@ def compute_hash(payload: Dict[str, Any]) -> str:
 
 
 def fetch_etl_run(conn, pipeline_name: str, run_date: str):
+    """
+    Fetch and validate the corresponding ETL pipeline run.
+    Args:
+        conn: active PostgreSQL connection
+        pipeline_name (str): ETL pipeline identifier
+        run_date (str): execution date in YYYY-MM-DD format
+    Returns:
+        pandas.Series: metadata row for the validated ETL run
+    Raises:
+        ValueError: if no run exists or the ETL run did not succeed
+    """
     query = """
         SELECT *
         FROM etl_pipeline_runs
@@ -47,6 +72,18 @@ def fetch_etl_run(conn, pipeline_name: str, run_date: str):
 
 
 def load_gold_dataset(conn, cfg: DataLoader, start_date, end_date) -> pd.DataFrame:
+    """
+    Load the gold dataset slice from the database.
+    Args:
+        conn: active PostgreSQL connection
+        cfg (DataLoader): dataset configuration object
+        start_date: inclusive start date for filtering
+        end_date: inclusive end date for filtering
+    Returns:
+        pd.DataFrame: ordered gold dataset slice
+    Raises:
+        ValueError: if the loaded dataset is empty
+    """
     query = sql.SQL("""
         SELECT * FROM {table} WHERE 
         {date_col} BETWEEN %s AND %s
@@ -58,7 +95,7 @@ def load_gold_dataset(conn, cfg: DataLoader, start_date, end_date) -> pd.DataFra
     df = pd.read_sql_query(
         query,
         conn,
-        params=[cfg.run_date, start_date, end_date]
+        params=[start_date, end_date]
     )
 
     if df.empty:
@@ -70,6 +107,15 @@ def load_gold_dataset(conn, cfg: DataLoader, start_date, end_date) -> pd.DataFra
 
 
 def split_dataset(df: pd.DataFrame):
+    """
+    Split a dataset into train, validation, and test partitions.
+    Args:
+        df (pd.DataFrame): full dataset ordered by run_date
+    Returns:
+        tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]: train, validation, and test splits
+    Raises:
+        ValueError: if any split is empty or invalid
+    """
     df = df.sort_values("run_date")
 
     n = len(df)
@@ -87,8 +133,14 @@ def split_dataset(df: pd.DataFrame):
     return train, val, test
 
 
-def build_dataset_cfg(cfg: DataLoader) -> Tuple[pd.DataFrame, Dict[str, Any]]:
-
+def build_dataset_cfg(cfg: DataLoader) -> Tuple[Dict[str, pd.DataFrame], Optional[Dict]]:
+    """
+    Build dataset partitions and metadata from a dataset configuration.
+    Args:
+        cfg (DataLoader): dataset build configuration
+    Returns:
+        Tuple[Dict[str, pd.DataFrame], Dict[str, Any]]: train/val/test partitions and metadata
+    """
     with get_connection() as conn:
 
         # 1. validate ETL run

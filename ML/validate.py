@@ -1,3 +1,14 @@
+"""
+ML Validation Schema
+
+Defines the gold ML dataset contract and runtime sanity checks.
+
+Core design principles:
+- validate target distribution and variance
+- enforce non-negative lag and rolling features
+- require consistent sell_price coverage for active sales
+"""
+
 import pandera as pa
 from pandera import Check
 

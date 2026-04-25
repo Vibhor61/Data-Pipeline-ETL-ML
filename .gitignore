@@ -4,3 +4,4 @@ mlflow
 .env
 logs/
 docs/
+schema/migrations/

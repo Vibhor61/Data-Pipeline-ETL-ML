@@ -3,7 +3,7 @@ CREATE TABLE IF NOT EXISTS ml_pipeline_runs (
     pipeline_name     TEXT NOT NULL,
     run_date          DATE NOT NULL,
 
-    status            TEXT NOT NULL,
+    status            TEXT NOT NULL CHECK (status in ('running','success','failed')),
     triggered_by      TEXT,
 
     created_at        TIMESTAMP,
@@ -50,7 +50,7 @@ CREATE INDEX IF NOT EXISTS idx_ml_dataset_run_id ON ml_dataset(run_id);
 CREATE INDEX IF NOT EXISTS idx_ml_dataset_feature_hash ON ml_dataset(feature_hash);
 
 CREATE TABLE IF NOT EXISTS ml_runs (
-    ml_run_id         TEXT PRIMARY KEY,
+    ml_run_id         TEXT,
 
     run_id            TEXT NOT NULL,
     dataset_id        TEXT NOT NULL,
@@ -59,7 +59,7 @@ CREATE TABLE IF NOT EXISTS ml_runs (
     status            TEXT NOT NULL,
 
     mlflow_run_id     TEXT,
-
+    source_mlflow_run_id    TEXT,
     created_at        TIMESTAMP,
     ended_at          TIMESTAMP,
     error_message     TEXT,

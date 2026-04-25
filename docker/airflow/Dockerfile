@@ -1,6 +1,6 @@
 FROM apache/airflow:2.8.1
 
-COPY requirements.txt .
+COPY requirements/airflow.txt /requirements.txt
 
 # Need constarints to ensure compatibilty
 RUN pip install --no-cache-dir \

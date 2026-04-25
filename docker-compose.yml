@@ -18,7 +18,8 @@ services:
       retries: 5
 
   airflow-init:
-    build: .
+    build: 
+      context: ./docker/airflow
     container_name: airflow_metadata
     depends_on:
       postgres:
@@ -46,7 +47,8 @@ services:
       --email admin@example.com || true"
 
   airflow-webserver:
-    build: .
+    build: 
+      context: ./docker/airflow
     container_name: airflow_webserver
     depends_on:
       airflow-init:
@@ -67,7 +69,8 @@ services:
     command: webserver
 
   airflow-scheduler:
-    build: .
+    build: 
+      context: ./docker/airflow
     container_name: airflow_scheduler
     depends_on:
       airflow-init:
@@ -86,14 +89,25 @@ services:
     command: scheduler
   
   mlflow:
-    image: mlflow
+    build:
+      context: ./docker/mlflow
     container_name: mlflow_server
+    working_dir: /mlflow
     ports:
       - "5000:5000"
     volumes:
-      - ./mlflow/mlruns:/app/mlruns
-      - ./mlflow/mlflow.db:/app/mlflow.db
-      - ./
+      - ./mlflow/artifacts:/mlflow/artifacts
+    environment:
+      MLFLOW_TRACKING_URI: postgresql://${PG_USER}:${PG_PASSWORD}@postgres:5432/mlflow_db
+    command: >
+      mlflow server
+      --backend-store-uri postgresql://${PG_USER}:${PG_PASSWORD}@postgres:5432/mlflow_db
+      --default-artifact-root /mlflow/artifacts
+      --host 0.0.0.0
+      --port 5000
+    depends_on:
+      postgres:
+        condition: service_healthy
     restart: unless-stopped
 
 volumes:
