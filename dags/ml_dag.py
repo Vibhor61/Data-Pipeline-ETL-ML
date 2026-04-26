@@ -3,6 +3,7 @@ from airflow.operators.python import PythonOperator
 from datetime import datetime
 import logging
 import mlflow
+from typing import Optional
 from utils.db import get_connection
 from utils.ml_helpers import(
     log_dataset, 
@@ -25,10 +26,8 @@ BASE_PATH = "/opt/airflow/data"
 DAG_ID = "retail_ml_dag"
 PIPELINE_NAME = "retail_pipeline"
 MLFLOW_TRACKING_URI = "http://mlflow:5000"
-MLFLOW_EXPERIMENT = "retail_demand_forecasting"
+MLFLOW_EXPERIMENT = "retail_sales_forecasting"
 
-mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
-mlflow.set_experiment(MLFLOW_EXPERIMENT)
 
 def run_stage(
     *,
@@ -36,7 +35,7 @@ def run_stage(
     run_id: str,
     dataset_id: str,
     parent_mlflow_run_id: str,
-    source_mlflow_run_id: str | None,
+    source_mlflow_run_id: Optional[str],
     stage_fn,
     stage_kwargs: dict
 ):
@@ -78,6 +77,7 @@ def run_stage(
                     source_mlflow_run_id=source_mlflow_run_id
                 )
 
+            stage_kwargs = {**stage_kwargs, "mlflow_run_id": mlflow_run_id}
             result = stage_fn(**stage_kwargs)
 
             with get_connection() as conn:
@@ -121,6 +121,9 @@ def task_create_run(**context):
     Creates or retrieves the ML pipeline run record.
     Starts an MLflow parent run and returns run metadata for downstream tasks.
     """
+
+    mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+    mlflow.set_experiment(MLFLOW_EXPERIMENT)
 
     run_date = context["ds"]
 
@@ -277,7 +280,7 @@ def task_evaluate(**context):
             "pred_path": dataset_context["pred_path"],
             "run_id": dataset_context["run_id"],
             "dataset_id": dataset_context["dataset_id"],
-            "train_mlflow_run_id": dataset_context["train_mlflow_run_id"]
+            "predict_mlflow_run_id": dataset_context["pred_mlflow_run_id"]
         }
     )
 
@@ -302,15 +305,19 @@ def task_finalize(**context):
             status="success"
         )
 
+default_args = {
+    "owner": "airflow",
+    "depends_on_past": False,
+    "retries": 0,
+}
 
 with DAG(
     dag_id=DAG_ID,
     start_date=datetime(2013, 1, 29),
     schedule_interval="@weekly",
-    catchup=False,
+    catchup=True,
     max_active_runs=1,
-    owner="airflow",
-    retries=2
+    default_args=default_args,
 ) as dag:
 
     create_run = PythonOperator(

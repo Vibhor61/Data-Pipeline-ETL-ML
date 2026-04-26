@@ -286,7 +286,7 @@ with DAG(
     description="Retail ETL DAG with run and step metadata tracking",
     start_date=datetime(2011,1,29),
     schedule_interval="@daily",
-    catchup=False,
+    catchup=True,
     max_active_runs=1,
 ) as dag:
     
@@ -300,8 +300,8 @@ with DAG(
         python_callable=bronze_task,
         op_kwargs={
             "sales_csv_path": "/opt/airflow/data/raw/sales_train_validation.csv",
-            "calendar_csv_path": "/opt/airflow/data/raw/calendar.csv",
-            "sell_prices_csv_path": "/opt/airflow/data/raw/sell_prices.csv",
+            "calendar_csv_path": None,
+            "sell_prices_csv_path": None
         },
     )
 

@@ -1,2 +1,2 @@
-mlflow
-psycopg2-binary
+mlflow==2.17.2
+psycopg2-binary==2.9.9

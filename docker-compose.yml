@@ -19,7 +19,8 @@ services:
 
   airflow-init:
     build: 
-      context: ./docker/airflow
+      context: .
+      dockerfile: docker/airflow/Dockerfile
     container_name: airflow_metadata
     depends_on:
       postgres:
@@ -48,7 +49,8 @@ services:
 
   airflow-webserver:
     build: 
-      context: ./docker/airflow
+      context: .
+      dockerfile: docker/airflow/Dockerfile
     container_name: airflow_webserver
     depends_on:
       airflow-init:
@@ -70,7 +72,8 @@ services:
 
   airflow-scheduler:
     build: 
-      context: ./docker/airflow
+      context: .
+      dockerfile: docker/airflow/Dockerfile
     container_name: airflow_scheduler
     depends_on:
       airflow-init:
@@ -90,7 +93,8 @@ services:
   
   mlflow:
     build:
-      context: ./docker/mlflow
+      context: .
+      dockerfile: docker/mlflow/Dockerfile
     container_name: mlflow_server
     working_dir: /mlflow
     ports:
