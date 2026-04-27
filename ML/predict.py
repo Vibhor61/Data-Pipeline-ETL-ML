@@ -23,7 +23,7 @@ import mlflow
 import mlflow.lightgbm
 import mlflow.xgboost
 
-from ML.preprocess import preprocess, transform
+from ML.preprocess import preprocess, transform_xgb, categorical_cols_cast
 
 logger = logging.getLogger(__name__)
 
@@ -45,9 +45,7 @@ def load_artifacts(mlflow_run_id: str):
         client.download_artifacts(mlflow_run_id, "features.json", tmpdir)
 
         encoders = joblib.load(os.path.join(tmpdir, "encoders.pkl"))
-
-        with open(os.path.join(tmpdir, "features.json"), "r") as f:
-            features = json.load(f)
+        features = json.load(open(os.path.join(tmpdir, "features.json")))
 
     return encoders, features
 
@@ -68,15 +66,15 @@ def load_model(mlflow_run_id: str):
 
     if best_model == "lgb":
         model_uri = f"runs:/{mlflow_run_id}/lgb_model"
-        return mlflow.lightgbm.load_model(model_uri)
+        return mlflow.lightgbm.load_model(model_uri), best_model
     elif best_model == "xgb":
         model_uri = f"runs:/{mlflow_run_id}/xgb_model"
-        return mlflow.xgboost.load_model(model_uri)
+        return mlflow.xgboost.load_model(model_uri), best_model
     else:
         raise ValueError(f"Unknown best_model: {best_model}")
     
 
-def predict_pipeline(test_path: str, run_id: str, dataset_id: str, train_mlflow_run_id: str):
+def predict_pipeline(test_path: str, run_id: str, dataset_id: str, train_mlflow_run_id: str, mlflow_run_id: str):
     """
     Run the model prediction pipeline and log prediction artifacts.
     Args:
@@ -93,41 +91,52 @@ def predict_pipeline(test_path: str, run_id: str, dataset_id: str, train_mlflow_
 
     logger.info("Prediction pipeline started for run_id=%s, train_mlflow_run_id=%s and dataset_id=%s", run_id, train_mlflow_run_id, dataset_id)
 
-    with mlflow.start_run(run_id=mlflow_run_id):
+    active_run = mlflow.active_run()
+    if active_run is None:
+        raise RuntimeError("No active MLflow run")
+    
+    if active_run.info.run_id != mlflow_run_id:
+        raise RuntimeError(
+            f"Active run {active_run.info.run_id} != expected {mlflow_run_id}"
+        )
+    
+    mlflow.set_tag("source_train_run_id", train_mlflow_run_id)
+    # Silent failure if trained on some dataset but evaluating on other without checking   
+    train_run = mlflow.get_run(train_mlflow_run_id)
 
-        # Silent failure if trained on some dataset but evaluating on other without checking   
-        run = mlflow.get_run(train_mlflow_run_id)
-        best_model_name = run.data.params.get("best_model")
-
-        trained_dataset_id = run.data.params.get("dataset_id")
-        if trained_dataset_id != dataset_id:
-            raise ValueError(
-                f"Dataset mismatch: model trained on {trained_dataset_id}, "
-                f"but prediction requested on {dataset_id}"
-            )
+    trained_dataset_id = train_run.data.params.get("dataset_id")
+    if trained_dataset_id != dataset_id:
+        raise ValueError(
+            f"Dataset mismatch: model trained on {trained_dataset_id}, "
+            f"but prediction requested on {dataset_id}"
+        )
 
 
-        test_df = pd.read_parquet(test_path)
-        test_df = preprocess(test_df)
-        X_test = test_df.drop(columns=[TARGET_COL])
+    test_df = pd.read_parquet(test_path)
+    test_df = preprocess(test_df)
+    X_test = test_df.drop(columns=[TARGET_COL])
 
-        encoders, features = load_artifacts(train_mlflow_run_id)
-        X_test = transform(X_test, encoders)
+    encoder, features = load_artifacts(train_mlflow_run_id)
+    model, model_type = load_model(train_mlflow_run_id)
+    
+    if model_type == "lgb":
+        X_test = categorical_cols_cast(X_test)
 
-        model = load_model(train_mlflow_run_id)
-        
-        preds = model.predict(X_test[features])
-        
-        pred_df = test_df.copy()
-        pred_df["prediction"] = preds
-        pred_df["actual"] = pred_df[TARGET_COL]
+    elif model_type == "xgb":
+        X_test = transform_xgb(X_test, encoder)
 
-        pred_path = os.path.join(os.path.dirname(test_path), "predictions.parquet")
-        pred_df.to_parquet(pred_path, index=False)
+    preds = model.predict(X_test[features])
+    
+    pred_df = test_df.copy()
+    pred_df["prediction"] = preds
+    pred_df["actual"] = pred_df[TARGET_COL]
 
-        mlflow.log_artifact(pred_path, artifact_path="predictions")
-        mlflow.log_metric("prediction_rows", len(pred_df))
+    pred_path = os.path.join(os.path.dirname(test_path), "predictions.parquet")
+    pred_df.to_parquet(pred_path, index=False)
 
-        logger.info("Prediction completed rows=%s", len(pred_df))
+    mlflow.log_artifact(pred_path, artifact_path="predictions")
+    mlflow.log_metric("prediction_rows", len(pred_df))
 
-        return pred_path
+    logger.info("Prediction completed rows=%s", len(pred_df))
+
+    return pred_path

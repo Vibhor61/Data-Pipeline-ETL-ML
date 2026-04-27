@@ -85,14 +85,16 @@ def compute_slice_metrics(df: pd.DataFrame, group_col: str) -> pd.DataFrame:
     return metrics_df
 
 
-def evaluate_pipeline(pred_path: str, run_id: str, dataset_id: str, predict_mlflow_run_id: str, mlflow_run_id: str):
+def evaluate_pipeline(pred_path: str, run_id: str, dataset_id: str, train_mlflow_run_id: str, pred_mlflow_run_id: str, mlflow_run_id: str):
     """
     Run evaluation for a prediction artifact and log metrics to MLflow.
     Args:
         pred_path (str): path to prediction parquet file
         run_id (str): current evaluation pipeline run id
         dataset_id (str): dataset identifier used at training time
-        predict_mlflow_run_id (str): MLflow run id for the trained model
+        train_mlflow_run_id (str): MLflow run id for the trained model
+        pred_mlflow_run_id (str): MLflow run id for the prediction
+        mlflow_run_id (str): MLflow run id for the evaluation
     Returns:
         None
     Raises:
@@ -101,58 +103,69 @@ def evaluate_pipeline(pred_path: str, run_id: str, dataset_id: str, predict_mlfl
     """
     logger.info("Evaluation pipeline started for run_id=%s dataset_id=%s", run_id, dataset_id)
     
-    with mlflow.start_run(run_id=mlflow_run_id):
-        run = mlflow.get_run(predict_mlflow_run_id)
-        trained_dataset_id = run.data.params.get("dataset_id")
-        if trained_dataset_id != dataset_id:
-            raise ValueError(
-                f"Dataset mismatch: model trained on {trained_dataset_id}, "
-                f"evaluate requested on {dataset_id}"
-            )
-
-        pred_df = pd.read_parquet(pred_path)
-
-        required_cols = {"actual", "prediction"}
-        if not required_cols.issubset(pred_df.columns):
-            raise ValueError(
-                f"Predictions file must contain columns {required_cols}"
-            )
+    active_run = mlflow.active_run()
+    if active_run is None:
+        raise RuntimeError("No active MLflow run")
+    
+    if active_run.info.run_id != mlflow_run_id:
+        raise RuntimeError(
+            f"Active run {active_run.info.run_id} != expected {mlflow_run_id}"
+        )
         
-        y_true = pred_df["actual"]
-        y_pred = pred_df["prediction"]
+    mlflow.set_tag("source_train_run_id", train_mlflow_run_id)
+    mlflow.set_tag("source_pred_run_id", pred_mlflow_run_id)
 
-        metrics = {
-            "test_rmse": rmse(y_true, y_pred),
-            "test_mae": mean_absolute_error(y_true, y_pred),
-            "test_mape": mape(y_true, y_pred),
-            "test_wmape": wmape(y_true, y_pred),
-            "test_r2": r2_score(y_true, y_pred)
-        }
+    train_run = mlflow.get_run(train_mlflow_run_id)
+    trained_dataset_id = train_run.data.params.get("dataset_id")
+    if trained_dataset_id != dataset_id:
+        raise ValueError(
+            f"Dataset mismatch: model trained on {trained_dataset_id}, "
+            f"evaluate requested on {dataset_id}"
+        )
 
-        errors = y_true - y_pred
-        metrics["error_mean"] = errors.mean()
-        metrics["error_std"] = errors.std()
+    pred_df = pd.read_parquet(pred_path)
 
-        mlflow.log_metrics(metrics)
+    required_cols = {"actual", "prediction"}
+    if not required_cols.issubset(pred_df.columns):
+        raise ValueError(
+            f"Predictions file must contain columns {required_cols}"
+        )
+    
+    y_true = pred_df["actual"]
+    y_pred = pred_df["prediction"]
 
-        store_metrics = compute_slice_metrics(pred_df, STORE_COL)
-        dept_metrics = compute_slice_metrics(pred_df, DEPT_COL)
+    metrics = {
+        "test_rmse": rmse(y_true, y_pred),
+        "test_mae": mean_absolute_error(y_true, y_pred),
+        "test_mape": mape(y_true, y_pred),
+        "test_wmape": wmape(y_true, y_pred),
+        "test_r2": r2_score(y_true, y_pred)
+    }
 
-        mlflow.log_metric("worst_store_wmape", store_metrics["wmape"].max())
-        mlflow.log_metric("worst_dept_wmape", dept_metrics["wmape"].max())
+    errors = y_true - y_pred
+    metrics["error_mean"] = errors.mean()
+    metrics["error_std"] = errors.std()
 
-        mlflow.log_metric("best_store_wmape", store_metrics["wmape"].min())
-        mlflow.log_metric("best_dept_wmape", dept_metrics["wmape"].min())
+    mlflow.log_metrics(metrics)
 
-        with tempfile.TemporaryDirectory() as tmpdir:
+    store_metrics = compute_slice_metrics(pred_df, STORE_COL)
+    dept_metrics = compute_slice_metrics(pred_df, DEPT_COL)
 
-            store_path = os.path.join(tmpdir, "store_metrics.csv")
-            dept_path = os.path.join(tmpdir, "department_metrics.csv")
+    mlflow.log_metric("worst_store_wmape", store_metrics["wmape"].max())
+    mlflow.log_metric("worst_dept_wmape", dept_metrics["wmape"].max())
 
-            store_metrics.to_csv(store_path, index=False)
-            dept_metrics.to_csv(dept_path, index=False)
+    mlflow.log_metric("best_store_wmape", store_metrics["wmape"].min())
+    mlflow.log_metric("best_dept_wmape", dept_metrics["wmape"].min())
 
-            mlflow.log_artifact(store_path, artifact_path="slice_metrics")
-            mlflow.log_artifact(dept_path, artifact_path="slice_metrics")
+    with tempfile.TemporaryDirectory() as tmpdir:
 
-        logger.info("Evaluation completed run_id=%s", run_id)
+        store_path = os.path.join(tmpdir, "store_metrics.csv")
+        dept_path = os.path.join(tmpdir, "department_metrics.csv")
+
+        store_metrics.to_csv(store_path, index=False)
+        dept_metrics.to_csv(dept_path, index=False)
+
+        mlflow.log_artifact(store_path, artifact_path="slice_metrics")
+        mlflow.log_artifact(dept_path, artifact_path="slice_metrics")
+
+    logger.info("Evaluation completed run_id=%s", run_id)

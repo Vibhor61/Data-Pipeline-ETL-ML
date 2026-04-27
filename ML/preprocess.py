@@ -15,7 +15,7 @@ Core design principles:
 
 import pandas as pd
 from typing import Dict
-from sklearn.preprocessing import LabelEncoder
+from sklearn.preprocessing import LabelEncoder, OrdinalEncoder
 
 CATEGORICAL_COLS = [
     "item_id",
@@ -50,7 +50,8 @@ def preprocess(df: pd.DataFrame) -> pd.DataFrame:
     df = df.sort_values(["item_id", "store_id", "run_date"])
 
     for col in CATEGORICAL_COLS:
-        df[col] = df[col].fillna("None").astype(str)
+        if col in df.columns:
+            df[col] = df[col].fillna("None").astype(str)
 
     lag_cols = [col for col in df.columns if "lag" in col]
     roll_cols = [col for col in df.columns if "roll" in col]
@@ -68,7 +69,6 @@ def preprocess(df: pd.DataFrame) -> pd.DataFrame:
         df["sell_price"] = (
             df.groupby(group_cols)["sell_price"]
               .ffill()
-              .bfill()
         )
 
         df["sell_price"] = df["sell_price"].fillna(df["sell_price"].mean())
@@ -77,23 +77,34 @@ def preprocess(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def transform(df: pd.DataFrame, encoders: Dict[str, LabelEncoder]) -> pd.DataFrame:
+def categorical_cols_cast(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Apply label encoding to categorical features using pretrained encoders.
-    Args:
-        df (pd.DataFrame): dataset to transform
-        encoders (Dict[str, LabelEncoder]): fitted label encoders
-    Returns:
-        pd.DataFrame: encoded dataset ready for model input
+    Ensure categorical columns are of type 'category' for LightGBM.
     """
     df = df.copy()
+    for col in CATEGORICAL_COLS:
+        if col in df.columns:
+            df[col] = df[col].astype("category")
 
-    for col, le in encoders.items():
-        df[col] = df[col].astype(str)
+    return df
 
-        mask = ~df[col].isin(le.classes_)
-        df.loc[mask, col] = "UNK"
 
-        df[col] = le.transform(df[col])
+def fit_xgb_encoder(df: pd.DataFrame) -> OrdinalEncoder:
+    """
+    Fit ordinal encoder for XGBoost.
+    """
+    encoder = OrdinalEncoder(
+        handle_unknown="use_encoded_value",
+        unknown_value=-1
+    )
+    encoder.fit(df[CATEGORICAL_COLS])
+    return encoder
 
+
+def transform_xgb(df: pd.DataFrame, enc: OrdinalEncoder) -> pd.DataFrame:
+    """
+    Apply ordinal encoding for XGBoost.
+    """
+    df = df.copy()
+    df[CATEGORICAL_COLS] = enc.transform(df[CATEGORICAL_COLS])
     return df

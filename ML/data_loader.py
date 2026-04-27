@@ -134,6 +134,29 @@ def split_dataset(df: pd.DataFrame):
     return train, val, test
 
 
+def clean_dir(dataset_dir: str):
+    """
+    Remove dangling or corrupted parquet files from a prior failed attempt.
+    
+    Args:
+        dataset_dir: path to the dataset directory (e.g., /opt/airflow/data/datasets/hash123)
+        dataset_id: dataset identifier (for logging)
+    """
+
+    if not os.path.exists(dataset_dir):
+        logger.info("Dataset dir doesn't exist no cleanup needed")
+    
+    files = ["train.parquet","val.parquet","test.parquet"]
+
+    try: 
+        for file in files:
+            file_path = os.path.join(dataset_dir,file)
+            if(os.path.exists(file_path)):
+                os.remove(file_path)
+    except Exception as e:
+        logger.info("Error removing file {filepath}:{e}")
+        raise
+
 def build_dataset_cfg(cfg: DataLoader) -> Tuple[Dict[str, pd.DataFrame], Optional[Dict]]:
     """
     Build dataset partitions and metadata from a dataset configuration.
@@ -181,7 +204,8 @@ def build_dataset_cfg(cfg: DataLoader) -> Tuple[Dict[str, pd.DataFrame], Optiona
 
         dataset_dir = os.path.join(cfg.output_dir, dataset_id)
         os.makedirs(dataset_dir, exist_ok=True)
-
+        clean_dir(dataset_dir)
+        
         train_path = os.path.join(dataset_dir, "train.parquet")
         val_path = os.path.join(dataset_dir, "val.parquet")
         test_path = os.path.join(dataset_dir, "test.parquet")

@@ -208,6 +208,9 @@ def task_train(**context):
     ti = context["ti"]
     dataset_context = ti.xcom_pull(task_ids="build_dataset")
 
+    mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+    mlflow.set_experiment(MLFLOW_EXPERIMENT)
+
     result = run_stage(
         stage="train",
         run_id=dataset_context["run_id"],
@@ -238,6 +241,9 @@ def task_predict(**context):
    
     ti = context["ti"]
     dataset_context = ti.xcom_pull(task_ids="train")
+    
+    mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+    mlflow.set_experiment(MLFLOW_EXPERIMENT)
 
     result = run_stage(
         stage="predict",
@@ -270,6 +276,9 @@ def task_evaluate(**context):
     ti = context["ti"]
     dataset_context = ti.xcom_pull(task_ids="predict")
 
+    mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+    mlflow.set_experiment(MLFLOW_EXPERIMENT)
+
     run_stage(
         stage="evaluate",
         run_id=dataset_context["run_id"],
@@ -281,7 +290,8 @@ def task_evaluate(**context):
             "pred_path": dataset_context["pred_path"],
             "run_id": dataset_context["run_id"],
             "dataset_id": dataset_context["dataset_id"],
-            "predict_mlflow_run_id": dataset_context["pred_mlflow_run_id"]
+            "pred_mlflow_run_id": dataset_context["pred_mlflow_run_id"],
+            "train_mlflow_run_id": dataset_context["train_mlflow_run_id"]
         }
     )
 
@@ -306,6 +316,9 @@ def task_finalize(**context):
             status="success"
         )
 
+    logger.info("Pipeline finalized: run_id=%s", run_id)
+
+    
 default_args = {
     "owner": "airflow",
     "depends_on_past": False,
