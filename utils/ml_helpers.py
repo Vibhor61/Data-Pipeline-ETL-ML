@@ -170,7 +170,7 @@ def finish_ml_stage(
     logger.info("ML stage finished: run_id=%s stage=%s mlflow_run_id=%s status=%s", run_id, stage, mlflow_run_id, status)
 
 
-def log_dataset(conn, run_id: str, meta: dict):
+def log_dataset(conn, meta: dict):
     """
     Insert or overwrite dataset metadata for deterministic dataset_id.
     Ensures metadata stays aligned with overwritten parquet files.
@@ -229,7 +229,7 @@ def log_dataset(conn, run_id: str, meta: dict):
 
     payload = {
         "dataset_id": meta["dataset_id"],
-        "run_id": run_id,
+        "run_id": meta["run_id"],
         "pipeline_name": meta["pipeline_name"],
         "source_table": meta["source_table"],
 
@@ -256,4 +256,4 @@ def log_dataset(conn, run_id: str, meta: dict):
         cur.execute(query, payload)
 
     conn.commit()
-    logger.info("Dataset logged with dataset_id=%s run_id=%s", meta["dataset_id"],run_id)
+    logger.info("Dataset logged with dataset_id=%s run_id=%s", meta["dataset_id"], meta["run_id"])

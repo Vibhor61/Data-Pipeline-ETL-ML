@@ -28,11 +28,13 @@ BASE_DATE = pd.to_datetime("2011-01-29")
 
 @dataclass
 class DataLoader:
+    run_id: str
     pipeline_name: str  # ETL here
     run_date: str       # Airflow ds
     table_name: str     # gold table
     date_column: str    # typically "run_date"
     feature_version: str 
+    output_dir: str
 
 
 def compute_hash(payload: Dict[str, Any]) -> str:
@@ -40,13 +42,12 @@ def compute_hash(payload: Dict[str, Any]) -> str:
     return hashlib.sha256(normalized.encode()).hexdigest()
 
 
-def fetch_etl_run(conn, pipeline_name: str, run_date: str):
+def fetch_etl_run(conn, run_id:str) -> pd.Series:
     """
-    Fetch and validate the corresponding ETL pipeline run.
+    Fetch and validate the exact ETL run chosen by DAG.
     Args:
         conn: active PostgreSQL connection
-        pipeline_name (str): ETL pipeline identifier
-        run_date (str): execution date in YYYY-MM-DD format
+        run_id: unique identifier for the ETL run (from Airflow DAG)
     Returns:
         pandas.Series: metadata row for the validated ETL run
     Raises:
@@ -55,18 +56,18 @@ def fetch_etl_run(conn, pipeline_name: str, run_date: str):
     query = """
         SELECT *
         FROM etl_pipeline_runs
-        WHERE pipeline_name = %s
-        AND run_date = %s
+        WHERE run_id = %s
     """
-    df = pd.read_sql_query(query, conn, params=[pipeline_name, run_date])
+
+    df = pd.read_sql_query(query, conn, params=[run_id])
 
     if df.empty:
-        raise ValueError("No ETL run found for given pipeline_name + run_date")
+        raise ValueError(f"No ETL run found for run_id={run_id}")
 
     row = df.iloc[0]
 
     if row["status"] != "success":
-        raise ValueError(f"ETL not successful. Status={row['status']}")
+        raise ValueError(f"ETL run {run_id} not successful. Status={row['status']}")
 
     return row
 
@@ -144,7 +145,7 @@ def build_dataset_cfg(cfg: DataLoader) -> Tuple[Dict[str, pd.DataFrame], Optiona
     with get_connection() as conn:
 
         # 1. validate ETL run
-        fetch_etl_run(conn, cfg.pipeline_name, cfg.run_date)
+        fetch_etl_run(conn, cfg.run_id)
 
         # 2. load gold dataset
         run_date = pd.to_datetime(cfg.run_date)
@@ -195,7 +196,7 @@ def build_dataset_cfg(cfg: DataLoader) -> Tuple[Dict[str, pd.DataFrame], Optiona
             },
             
             "run_date": cfg.run_date,
-
+            "run_id": cfg.run_id,
             "row_counts": {
                 "train": len(train_df),
                 "val": len(val_df),

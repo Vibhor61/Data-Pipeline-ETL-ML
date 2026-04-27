@@ -36,6 +36,9 @@ GOLD_TABLE = os.getenv("GOLD_TABLE", "gold_table")
 
 
 def get_run_date(context):
+    dag_run = context.get("dag_run")
+    if dag_run and dag_run.conf and dag_run.conf.get("run_date"):
+        return dag_run.conf["run_date"]
     return context["ds"]
 
 def get_run_id(context) -> int:
@@ -285,7 +288,7 @@ with DAG(
     default_args=default_args,
     description="Retail ETL DAG with run and step metadata tracking",
     start_date=datetime(2011,1,29),
-    schedule_interval="@daily",
+    # schedule_interval="@daily",
     catchup=True,
     max_active_runs=1,
 ) as dag:

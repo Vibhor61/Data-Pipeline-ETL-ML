@@ -167,6 +167,7 @@ def task_build_dataset(**context):
     run_id = run_context["run_id"]   # airflow gives this
 
     cfg = DataLoader(
+        run_id=run_id,
         pipeline_name=PIPELINE_NAME,
         run_date=run_date,
         table_name="gold_table",
@@ -182,7 +183,7 @@ def task_build_dataset(**context):
     atomic_write_parquet(datasets["test"], meta["paths"]["test"])
 
     with get_connection() as conn:
-        log_dataset(conn, run_id, meta)
+        log_dataset(conn, meta)
 
     logger.info("Dataset built: dataset_id=%s, rows=%d",  meta["dataset_id"], meta["row_counts"]["total"])
 
@@ -314,7 +315,7 @@ default_args = {
 with DAG(
     dag_id=DAG_ID,
     start_date=datetime(2013, 1, 29),
-    schedule_interval="@weekly",
+    # schedule_interval="@weekly",
     catchup=True,
     max_active_runs=1,
     default_args=default_args,
