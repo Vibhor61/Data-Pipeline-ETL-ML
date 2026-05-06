@@ -50,11 +50,11 @@ CriticalFeatureSchema = pa.DataFrameSchema(
                         error="Lag features contain negative values"
                 ),
                 Check(
-                        lambda df: (df[ROLL_MEAN_COLS] >= 0).values().all(),
+                        lambda df: (df[ROLL_MEAN_COLS] >= 0).values.all(),
                         error = "Rolling mean features contain negative values"
                 ),
                 Check(
-                        lambda df: (df[ROLL_STD_COLS] >= 0).values().all(),
+                        lambda df: (df[ROLL_STD_COLS] >= 0).values.all(),
                         error = "Rolling std features contain negative values"
                 ),
         ],

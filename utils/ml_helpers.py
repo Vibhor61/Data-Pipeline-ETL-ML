@@ -5,12 +5,6 @@ import os
 
 logger = logging.getLogger(__name__)
 
-def atomic_write_parquet(df, final_path: str):
-    "Making overwrite atomic to remove any mid failure discrepancies"
-    temp_path = final_path + ".tmp"
-    df.to_parquet(temp_path, index=False)
-    os.replace(temp_path, final_path)
-
 
 def get_etl_run_id(conn, run_date: str):
     """

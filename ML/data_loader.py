@@ -13,10 +13,13 @@ Core design principles:
 """
 
 import logging
-from psycopg2 import sql
+import psycopg2 
 import pandas as pd
 import hashlib
 from dataclasses import dataclass
+import pyarrow as pa
+import pyarrow.parquet as pq
+
 from typing import Dict, Tuple, Optional, Any
 from utils.db import get_connection
 import json
@@ -72,66 +75,97 @@ def fetch_etl_run(conn, run_id:str) -> pd.Series:
     return row
 
 
-def load_gold_dataset(conn, cfg: DataLoader, start_date, end_date) -> pd.DataFrame:
+def split_dataset(conn, cfg: DataLoader, start_date, end_date):
+    rows_query = f"""
+        SELECT COUNT(*) FROM {cfg.table_name}
+        WHERE {cfg.date_column} BETWEEN %s AND %s
     """
-    Load the gold dataset slice from the database.
+
+    with conn.cursor() as cur:
+        cur.execute(rows_query, (start_date, end_date))
+        total_rows = cur.fetchone()[0]
+
+    if total_rows == 0:
+        raise ValueError("Empty dataset after filtering")
+
+    train_end = int(total_rows * 0.7)
+    val_end = int(total_rows * 0.85)
+    return total_rows, train_end, val_end
+
+def load_gold_dataset(conn, cfg: DataLoader, start_date, end_date, train_end, val_end, tmp_paths):
+    """
+    Load and write the gold dataset partitions from the database into parquet files.
     Args:
         conn: active PostgreSQL connection
         cfg (DataLoader): dataset configuration object
         start_date: inclusive start date for filtering
         end_date: inclusive end date for filtering
+        train_end: last row number for the training partition
+        val_end: last row number for the validation partition
+        tmp_paths: temporary parquet output paths for each partition
     Returns:
-        pd.DataFrame: ordered gold dataset slice
+        tuple: (columns, row_counts) for the loaded dataset
     Raises:
         ValueError: if the loaded dataset is empty
     """
-    query = sql.SQL("""
-        SELECT * FROM {table} WHERE 
-        {date_col} BETWEEN %s AND %s
-    """).format(
-        table=sql.Identifier(cfg.table_name),
-        date_col=sql.Identifier(cfg.date_column)
-    )
 
-    df = pd.read_sql_query(
-        query,
-        conn,
-        params=[start_date, end_date]
-    )
-
-    if df.empty:
-        raise ValueError("Empty dataset after filtering")
-
-    df = df.sort_values(by=cfg.date_column).reset_index(drop=True)
-
-    return df
-
-
-def split_dataset(df: pd.DataFrame):
+    query = f"""
+        WITH ordered AS (
+            SELECT *, ROW_NUMBER() OVER (ORDER BY {cfg.date_column}) AS row_num
+            FROM {cfg.table_name}
+            WHERE {cfg.date_column} BETWEEN %s AND %s
+        )
+        SELECT *,
+            CASE 
+                WHEN row_num <= %s THEN 'train'
+                WHEN row_num <= %s THEN 'val'
+                ELSE 'test'
+            END AS partition
+        FROM ordered
+        ORDER BY {cfg.date_column}
     """
-    Split a dataset into train, validation, and test partitions.
-    Args:
-        df (pd.DataFrame): full dataset ordered by run_date
-    Returns:
-        tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]: train, validation, and test splits
-    Raises:
-        ValueError: if any split is empty or invalid
-    """
-    df = df.sort_values("run_date")
 
-    n = len(df)
+    cursor = conn.cursor(name="dataset_cursor")
+    cursor.itersize = 10000
+    cursor.execute(query, (start_date, end_date, train_end, val_end))
+    
+    columns = [desc[0] for desc in cursor.description]
 
-    train_end = int(n * 0.7)
-    val_end = int(n * 0.85)
+    writers = {"train": None, "val": None, "test": None}
+    row_counts = {"train": 0, "val": 0, "test": 0}
 
-    train = df.iloc[:train_end]
-    val = df.iloc[train_end:val_end]
-    test = df.iloc[val_end:]
+    while True:
+        batch = cursor.fetchmany(10000)
+        if not batch:
+            break
+        
+        df_batch = pd.DataFrame(batch, columns=columns)
 
-    if train.empty or val.empty or test.empty:
-        raise ValueError("Invalid split sizes")
+        for partition in ["train", "val", "test"]:
+            partition_df = df_batch[df_batch["partition"] == partition].drop(columns=["partition"])
+            
+            if not partition_df.empty:
+                table = pa.Table.from_pandas(partition_df)
+                if writers[partition] is None:
+                    writers[partition] = pq.ParquetWriter(tmp_paths[partition], table.schema)
+                
+                writers[partition].write_table(table)
+                row_counts[partition] += len(partition_df)
 
-    return train, val, test
+    for w in writers.values():
+        if w:
+            w.close()
+
+    return columns, row_counts
+
+
+def atomic_commit(tmp_paths, final_paths):
+    for key in final_paths:
+        tmp = tmp_paths[key]
+        final = final_paths[key]
+
+        if os.path.exists(tmp):
+            os.rename(tmp, final)
 
 
 def clean_dir(dataset_dir: str):
@@ -140,12 +174,11 @@ def clean_dir(dataset_dir: str):
     
     Args:
         dataset_dir: path to the dataset directory (e.g., /opt/airflow/data/datasets/hash123)
-        dataset_id: dataset identifier (for logging)
     """
 
     if not os.path.exists(dataset_dir):
         logger.info("Dataset dir doesn't exist no cleanup needed")
-    
+        return 
     files = ["train.parquet","val.parquet","test.parquet"]
 
     try: 
@@ -154,16 +187,16 @@ def clean_dir(dataset_dir: str):
             if(os.path.exists(file_path)):
                 os.remove(file_path)
     except Exception as e:
-        logger.info("Error removing file {filepath}:{e}")
+        logger.info(f"Error removing file {file_path}: {e}")
         raise
 
-def build_dataset_cfg(cfg: DataLoader) -> Tuple[Dict[str, pd.DataFrame], Optional[Dict]]:
+def build_dataset_cfg(cfg: DataLoader) -> Tuple[Dict[str, str], Dict[str, Any]]:
     """
-    Build dataset partitions and metadata from a dataset configuration.
+    Build dataset parquet file paths and metadata from a dataset configuration.
     Args:
         cfg (DataLoader): dataset build configuration
     Returns:
-        Tuple[Dict[str, pd.DataFrame], Dict[str, Any]]: train/val/test partitions and metadata
+        Tuple[Dict[str, str], Dict[str, Any]]: partition file paths and dataset metadata
     """
     with get_connection() as conn:
 
@@ -179,13 +212,40 @@ def build_dataset_cfg(cfg: DataLoader) -> Tuple[Dict[str, pd.DataFrame], Optiona
         else:
             start_date = run_date - pd.Timedelta(days=1000)
 
-        df = load_gold_dataset(conn, cfg, start_date, end_date)
-        train_df, val_df, test_df = split_dataset(df)
+        total_rows, train_end, val_end = split_dataset(
+            conn, cfg, start_date, end_date
+        )
+
+        temp_id = compute_hash({
+            "pipeline_name": cfg.pipeline_name,
+            "run_date": cfg.run_date,
+            "feature_version": cfg.feature_version,
+            "row_count": total_rows,
+            "run_id": cfg.run_id
+        })
+
+        dataset_dir = os.path.join(cfg.output_dir, temp_id)
+        os.makedirs(dataset_dir, exist_ok=True)
+        clean_dir(dataset_dir)
+
+        final_paths = {
+            "train": os.path.join(dataset_dir, "train.parquet"),
+            "val": os.path.join(dataset_dir, "val.parquet"),
+            "test": os.path.join(dataset_dir, "test.parquet"),
+        }
+
+        tmp_paths = {k: v + ".tmp" for k, v in final_paths.items()}
+
+        columns, row_counts = load_gold_dataset(
+            conn, cfg, start_date, end_date,
+            train_end, val_end, tmp_paths
+        )
+
+        atomic_commit(tmp_paths, final_paths)
 
         # 3. schema hash
         schema_hash = compute_hash({
-            "columns": list(df.columns),
-            "dtypes": {c: str(df[c].dtype) for c in df.columns}
+            "columns": columns,
         })
 
         # 4. feature hash
@@ -197,40 +257,21 @@ def build_dataset_cfg(cfg: DataLoader) -> Tuple[Dict[str, pd.DataFrame], Optiona
         dataset_id = compute_hash({
             "pipeline_name": cfg.pipeline_name,
             "run_date": cfg.run_date,
+            "etl_run_id": cfg.run_id,
             "schema_hash": schema_hash,
             "feature_hash": feature_hash,
-            "row_count": len(df)
+            "row_count": total_rows
         })
-
-        dataset_dir = os.path.join(cfg.output_dir, dataset_id)
-        os.makedirs(dataset_dir, exist_ok=True)
-        clean_dir(dataset_dir)
-        
-        train_path = os.path.join(dataset_dir, "train.parquet")
-        val_path = os.path.join(dataset_dir, "val.parquet")
-        test_path = os.path.join(dataset_dir, "test.parquet")
 
         metadata = {
             "dataset_id": dataset_id,
             "pipeline_name": cfg.pipeline_name,
-            "paths": {
-                "train": train_path,
-                "val": val_path,
-                "test": test_path
-            },
-            
+            "paths": final_paths,
             "run_date": cfg.run_date,
             "run_id": cfg.run_id,
-            "row_counts": {
-                "train": len(train_df),
-                "val": len(val_df),
-                "test": len(test_df),
-                "total": len(df)
-            },
-
+            "row_counts": {**row_counts, "total": total_rows},
             "dataset_start_date": str(start_date.date()),
             "dataset_end_date": str(end_date.date()),
-
             "schema_hash": schema_hash,
             "feature_hash": feature_hash,
             "feature_version": cfg.feature_version,
@@ -238,10 +279,6 @@ def build_dataset_cfg(cfg: DataLoader) -> Tuple[Dict[str, pd.DataFrame], Optiona
         }
         
         logger.info("Dataset built: %s", dataset_id)
-        
-        return {
-            "train": train_df,
-            "val": val_df,
-            "test": test_df
-            }, metadata
+
+        return final_paths, metadata
     

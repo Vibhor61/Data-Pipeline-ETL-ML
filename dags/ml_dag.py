@@ -11,8 +11,7 @@ from utils.ml_helpers import(
     get_etl_run_id,
     start_ml_stage,
     finish_ml_stage,
-    update_ml_pipeline_status,
-    atomic_write_parquet
+    update_ml_pipeline_status
 )
 
 from ML.train import train_main
@@ -22,11 +21,15 @@ from ML.evaluate import evaluate_pipeline
 
 logger = logging.getLogger(__name__)
 
+
+def _safe_str(value):
+    return None if value is None else str(value)
+
 BASE_PATH = "/opt/airflow/data"
 DAG_ID = "retail_ml_dag"
 PIPELINE_NAME = "retail_pipeline"
 MLFLOW_TRACKING_URI = "http://mlflow:5000"
-MLFLOW_EXPERIMENT = "retail_sales_forecasting"
+MLFLOW_EXPERIMENT = "retail_demand_forecasting"
 
 
 def run_stage(
@@ -58,10 +61,12 @@ def run_stage(
     """
     ml_run_id = f"{run_id}_{stage}"
     mlflow_run_id = None
+    parent_mlflow_run_id = _safe_str(parent_mlflow_run_id)
+    source_mlflow_run_id = _safe_str(source_mlflow_run_id)
 
     try:
-        with mlflow.start_run(run_name=ml_run_id) as run:
-            mlflow_run_id = run.info.run_id
+        with mlflow.start_run(run_name=str(ml_run_id)) as run:
+            mlflow_run_id = str(run.info.run_id)
 
             mlflow.set_tag("parent_run_id", parent_mlflow_run_id)
             mlflow.set_tag("stage", stage)
@@ -91,7 +96,7 @@ def run_stage(
                 )
 
             return {
-                "mlflow_run_id": mlflow_run_id,
+                "mlflow_run_id": _safe_str(mlflow_run_id),
                 "result": result
             }
 
@@ -141,10 +146,10 @@ def task_create_run(**context):
             triggered_by="scheduler"
         )
 
-    with mlflow.start_run(run_name=run_id) as run:
-        mlflow_run_id = run.info.run_id
+    with mlflow.start_run(run_name=str(run_id)) as run:
+        mlflow_run_id = str(run.info.run_id)
         mlflow.set_tag("pipeline_name", PIPELINE_NAME)
-        mlflow.set_tag("run_id", run_id)
+        mlflow.set_tag("run_id", str(run_id))
         mlflow.set_tag("run_date", run_date)
        
     logger.info("Created ML pipeline run: run_id=%s, mlflow_run_id=%s", run_id, mlflow_run_id)
@@ -176,14 +181,12 @@ def task_build_dataset(**context):
         output_dir="/opt/airflow/data/datasets"
     )
 
-    datasets, meta = build_dataset_cfg(cfg)
-
-    atomic_write_parquet(datasets["train"], meta["paths"]["train"])
-    atomic_write_parquet(datasets["val"], meta["paths"]["val"])
-    atomic_write_parquet(datasets["test"], meta["paths"]["test"])
+    paths, meta = build_dataset_cfg(cfg)
 
     with get_connection() as conn:
         log_dataset(conn, meta)
+
+    logger.info("Dataset built at paths: %s", paths)
 
     logger.info("Dataset built: dataset_id=%s, rows=%d",  meta["dataset_id"], meta["row_counts"]["total"])
 
@@ -256,7 +259,7 @@ def task_predict(**context):
             "test_path": dataset_context["test_path"],
             "run_id": dataset_context["run_id"],
             "dataset_id": dataset_context["dataset_id"],
-            "train_mlflow_run_id": dataset_context["train_mlflow_run_id"]
+            "train_mlflow_run_id": _safe_str(dataset_context["train_mlflow_run_id"])
         }
     )
 
@@ -290,8 +293,8 @@ def task_evaluate(**context):
             "pred_path": dataset_context["pred_path"],
             "run_id": dataset_context["run_id"],
             "dataset_id": dataset_context["dataset_id"],
-            "pred_mlflow_run_id": dataset_context["pred_mlflow_run_id"],
-            "train_mlflow_run_id": dataset_context["train_mlflow_run_id"]
+            "pred_mlflow_run_id": _safe_str(dataset_context["pred_mlflow_run_id"]),
+            "train_mlflow_run_id": _safe_str(dataset_context["train_mlflow_run_id"])
         }
     )
 
@@ -327,14 +330,15 @@ default_args = {
 
 with DAG(
     dag_id=DAG_ID,
-    start_date=datetime(2013, 1, 29),
+    start_date=datetime(2012, 1, 1),
     # schedule_interval="@weekly",
-    catchup=True,
+    catchup=False,
     max_active_runs=1,
     default_args=default_args,
 ) as dag:
 
     create_run = PythonOperator(
+        
         task_id="create_run",
         python_callable=task_create_run
     )
