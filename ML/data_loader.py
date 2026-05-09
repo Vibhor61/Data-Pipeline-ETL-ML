@@ -1,33 +1,37 @@
-"""
-Gold ML Data Loader
-
-Builds training, validation, and test datasets from ETL gold output.
-
-Input: validated ETL gold table and pipeline run metadata
-Output: partitioned datasets, dataset metadata, and stable dataset hashes
-
-Core design principles:
-- dataset provenance is tracked through ETL run validation
-- train/val/test splits are derived from run_date ordering
-- schema and feature version hashes enable reproducible datasets
-"""
-
+from collections import defaultdict
 import logging
-import psycopg2 
+import shutil
 import pandas as pd
 import hashlib
+import gc
+import psutil
+import json
+import os
+import joblib
+
+from typing import Dict, List, Tuple, Any
 from dataclasses import dataclass
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from typing import Dict, Tuple, Optional, Any
 from utils.db import get_connection
-import json
-import os
+from ML.preprocess import preprocess, fit_encoder, transform_xgb, CATEGORICAL_COLS
 
 logger = logging.getLogger(__name__)
-
 BASE_DATE = pd.to_datetime("2011-01-29")
+TARGET_COL = "sales"
+
+CURSOR_BATCH_SIZE = 10_000
+
+def get_memory_usage_mb() -> float:
+    process = psutil.Process(os.getpid())
+    return process.memory_info().rss / 1024 / 1024
+
+
+def compute_hash(payload: Dict[str, Any]) -> str:
+    normalized = json.dumps(payload, sort_keys=True, default=str)
+    return hashlib.sha256(normalized.encode()).hexdigest()
+
 
 @dataclass
 class DataLoader:
@@ -40,25 +44,32 @@ class DataLoader:
     output_dir: str
 
 
-def compute_hash(payload: Dict[str, Any]) -> str:
-    normalized = json.dumps(payload, sort_keys=True, default=str)
-    return hashlib.sha256(normalized.encode()).hexdigest()
+class LibSVMWriter:
+    def __init__(self, file_path: str, feature_cols: List[str], target_col: str):
+        self.file_path = file_path
+        self.feature_cols = feature_cols
+        self.target_col = target_col
+        self.file = open(file_path, "w")
+
+    def write_batch(self, df: pd.DataFrame):
+        for row in df.itertuples(index=False):
+            label = getattr(row, self.target_col)
+            features = []
+            for i, col in enumerate(self.feature_cols, start=1):
+                val = getattr(row, col)
+                if pd.notna(val) and val != 0:
+                    features.append(f"{i}:{val}")
+
+            line = f"{label} " + " ".join(features)
+            self.file.write(line + "\n")
+
+    def close(self):
+        self.file.close()
 
 
 def fetch_etl_run(conn, run_id:str) -> pd.Series:
-    """
-    Fetch and validate the exact ETL run chosen by DAG.
-    Args:
-        conn: active PostgreSQL connection
-        run_id: unique identifier for the ETL run (from Airflow DAG)
-    Returns:
-        pandas.Series: metadata row for the validated ETL run
-    Raises:
-        ValueError: if no run exists or the ETL run did not succeed
-    """
     query = """
-        SELECT *
-        FROM etl_pipeline_runs
+        SELECT * FROM etl_pipeline_runs
         WHERE run_id = %s
     """
 
@@ -75,210 +86,321 @@ def fetch_etl_run(conn, run_id:str) -> pd.Series:
     return row
 
 
-def split_dataset(conn, cfg: DataLoader, start_date, end_date):
-    rows_query = f"""
-        SELECT COUNT(*) FROM {cfg.table_name}
-        WHERE {cfg.date_column} BETWEEN %s AND %s
-    """
-
-    with conn.cursor() as cur:
-        cur.execute(rows_query, (start_date, end_date))
-        total_rows = cur.fetchone()[0]
-
-    if total_rows == 0:
-        raise ValueError("Empty dataset after filtering")
-
-    train_end = int(total_rows * 0.7)
-    val_end = int(total_rows * 0.85)
-    return total_rows, train_end, val_end
-
-def load_gold_dataset(conn, cfg: DataLoader, start_date, end_date, train_end, val_end, tmp_paths):
-    """
-    Load and write the gold dataset partitions from the database into parquet files.
-    Args:
-        conn: active PostgreSQL connection
-        cfg (DataLoader): dataset configuration object
-        start_date: inclusive start date for filtering
-        end_date: inclusive end date for filtering
-        train_end: last row number for the training partition
-        val_end: last row number for the validation partition
-        tmp_paths: temporary parquet output paths for each partition
-    Returns:
-        tuple: (columns, row_counts) for the loaded dataset
-    Raises:
-        ValueError: if the loaded dataset is empty
-    """
-
-    query = f"""
-        WITH ordered AS (
-            SELECT *, ROW_NUMBER() OVER (ORDER BY {cfg.date_column}) AS row_num
-            FROM {cfg.table_name}
-            WHERE {cfg.date_column} BETWEEN %s AND %s
-        )
-        SELECT *,
-            CASE 
-                WHEN row_num <= %s THEN 'train'
-                WHEN row_num <= %s THEN 'val'
-                ELSE 'test'
-            END AS partition
-        FROM ordered
-        ORDER BY {cfg.date_column}
-    """
-
-    cursor = conn.cursor(name="dataset_cursor")
-    cursor.itersize = 10000
-    cursor.execute(query, (start_date, end_date, train_end, val_end))
-    
-    columns = [desc[0] for desc in cursor.description]
-
-    writers = {"train": None, "val": None, "test": None}
-    row_counts = {"train": 0, "val": 0, "test": 0}
-
-    while True:
-        batch = cursor.fetchmany(10000)
-        if not batch:
-            break
-        
-        df_batch = pd.DataFrame(batch, columns=columns)
-
-        for partition in ["train", "val", "test"]:
-            partition_df = df_batch[df_batch["partition"] == partition].drop(columns=["partition"])
-            
-            if not partition_df.empty:
-                table = pa.Table.from_pandas(partition_df)
-                if writers[partition] is None:
-                    writers[partition] = pq.ParquetWriter(tmp_paths[partition], table.schema)
-                
-                writers[partition].write_table(table)
-                row_counts[partition] += len(partition_df)
-
-    for w in writers.values():
-        if w:
-            w.close()
-
-    return columns, row_counts
-
-
-def atomic_commit(tmp_paths, final_paths):
-    for key in final_paths:
-        tmp = tmp_paths[key]
-        final = final_paths[key]
-
-        if os.path.exists(tmp):
-            os.rename(tmp, final)
+def compute_time_split(start_date: pd.Timestamp, end_date: pd.Timestamp):
+    total_days = (end_date - start_date).days
+    train_end = start_date + pd.Timedelta(days=int(total_days * 0.7))
+    val_end = start_date + pd.Timedelta(days=int(total_days * 0.85))
+    return train_end, val_end
 
 
 def clean_dir(dataset_dir: str):
-    """
-    Remove dangling or corrupted parquet files from a prior failed attempt.
-    
-    Args:
-        dataset_dir: path to the dataset directory (e.g., /opt/airflow/data/datasets/hash123)
-    """
-
     if not os.path.exists(dataset_dir):
         logger.info("Dataset dir doesn't exist no cleanup needed")
         return 
-    files = ["train.parquet","val.parquet","test.parquet"]
+    
+    files = [
+        "train.parquet","val.parquet","test.parquet",
+        "train.parquet.tmp","val.parquet.tmp","test.parquet.tmp",
+        "train.libsvm","val.libsvm","test.libsvm",
+        "encoders.pkl","features.json","metadata.json"
+    ]
 
     try: 
         for file in files:
             file_path = os.path.join(dataset_dir,file)
             if(os.path.exists(file_path)):
                 os.remove(file_path)
+                logger.info(f"Removed file: {file_path}")
     except Exception as e:
         logger.info(f"Error removing file {file_path}: {e}")
         raise
 
-def build_dataset_cfg(cfg: DataLoader) -> Tuple[Dict[str, str], Dict[str, Any]]:
+
+def build_encoder(conn, cfg: DataLoader, start_date, train_end_date):
+
+    logger.info(f"Fitting encoder for {start_date} to {train_end_date}")
+    
+    vocab = defaultdict(set)
+
+    cols = ", ".join(CATEGORICAL_COLS)
+    query = f"""
+        SELECT {cols} 
+        FROM {cfg.table_name}
+        WHERE {cfg.date_column} BETWEEN %s AND %s
     """
-    Build dataset parquet file paths and metadata from a dataset configuration.
-    Args:
-        cfg (DataLoader): dataset build configuration
-    Returns:
-        Tuple[Dict[str, str], Dict[str, Any]]: partition file paths and dataset metadata
+
+    cursor = conn.cursor(name="encoder_cursor")
+    cursor.itersize = CURSOR_BATCH_SIZE
+    cursor.execute(query, (start_date, train_end_date))
+
+    columns = [desc[0] for desc in cursor.description]
+
+    logger.info("Streaming data for encoder fitting")
+
+    while True:
+        batch = cursor.fetchmany(CURSOR_BATCH_SIZE)
+
+        if not batch:
+            break
+
+        df = pd.DataFrame(batch, columns=columns)
+
+        for col in CATEGORICAL_COLS:
+            vocab[col].update(
+                df[col]
+                .dropna()
+                .astype(str)
+                .unique()
+            )
+
+        del df
+    
+    cursor.close()
+
+    encoders = {}
+    for col in CATEGORICAL_COLS:
+        values = sorted(vocab[col])
+
+        mapping = {v: i for i, v in enumerate(values)}
+        mapping["__UNK__"] = len(mapping)
+
+        encoders[col] = mapping
+
+    gc.collect()
+
+    logger.info(f"Encoder fitted for {start_date} to {train_end_date}")
+    return encoders
+
+
+def load_gold_dataset(conn, cfg: DataLoader, start_date, end_date, train_end, val_end, tmp_paths, libsvm_paths, encoders ):
+    query = f"""
+        SELECT *
+        FROM {cfg.table_name}
+        WHERE {cfg.date_column}
+            BETWEEN %s AND %s
+        ORDER BY item_id, store_id, {cfg.date_column}
     """
-    with get_connection() as conn:
 
-        # 1. validate ETL run
-        fetch_etl_run(conn, cfg.run_id)
+    cursor = conn.cursor(name="dataset_cursor")
+    cursor.itersize = CURSOR_BATCH_SIZE
+    cursor.execute(query, (start_date, end_date))
+    
+    columns = [desc[0] for desc in cursor.description]
+    
+    FEATURES = None
+    parquet_writers = {"train": None, "val": None, "test": None}
+    libsvm_writers = {"train": None, "val": None, "test": None}
 
-        # 2. load gold dataset
-        run_date = pd.to_datetime(cfg.run_date)
-        end_date = run_date
+    row_counts = {"train": 0, "val": 0, "test": 0}
 
-        if run_date - pd.Timedelta(days=1000) < BASE_DATE:
-            start_date = BASE_DATE
-        else:
-            start_date = run_date - pd.Timedelta(days=1000)
+    initial_memory = get_memory_usage_mb()
+    logger.info(f"Streaming dataset initial memory usage: {initial_memory:.2f} MB")
 
-        total_rows, train_end, val_end = split_dataset(
-            conn, cfg, start_date, end_date
-        )
-
-        temp_id = compute_hash({
-            "pipeline_name": cfg.pipeline_name,
-            "run_date": cfg.run_date,
-            "feature_version": cfg.feature_version,
-            "row_count": total_rows,
-            "run_id": cfg.run_id
-        })
-
-        dataset_dir = os.path.join(cfg.output_dir, temp_id)
-        os.makedirs(dataset_dir, exist_ok=True)
-        clean_dir(dataset_dir)
-
-        final_paths = {
-            "train": os.path.join(dataset_dir, "train.parquet"),
-            "val": os.path.join(dataset_dir, "val.parquet"),
-            "test": os.path.join(dataset_dir, "test.parquet"),
-        }
-
-        tmp_paths = {k: v + ".tmp" for k, v in final_paths.items()}
-
-        columns, row_counts = load_gold_dataset(
-            conn, cfg, start_date, end_date,
-            train_end, val_end, tmp_paths
-        )
-
-        atomic_commit(tmp_paths, final_paths)
-
-        # 3. schema hash
-        schema_hash = compute_hash({
-            "columns": columns,
-        })
-
-        # 4. feature hash
-        feature_hash = compute_hash({
-            "feature_version": cfg.feature_version
-        })
-
-        # 5. dataset hash (CORE CONTRACT)
-        dataset_id = compute_hash({
-            "pipeline_name": cfg.pipeline_name,
-            "run_date": cfg.run_date,
-            "etl_run_id": cfg.run_id,
-            "schema_hash": schema_hash,
-            "feature_hash": feature_hash,
-            "row_count": total_rows
-        })
-
-        metadata = {
-            "dataset_id": dataset_id,
-            "pipeline_name": cfg.pipeline_name,
-            "paths": final_paths,
-            "run_date": cfg.run_date,
-            "run_id": cfg.run_id,
-            "row_counts": {**row_counts, "total": total_rows},
-            "dataset_start_date": str(start_date.date()),
-            "dataset_end_date": str(end_date.date()),
-            "schema_hash": schema_hash,
-            "feature_hash": feature_hash,
-            "feature_version": cfg.feature_version,
-            "source_table": cfg.table_name
-        }
+    batch_num = 0
+    while True:
+        batch = cursor.fetchmany(CURSOR_BATCH_SIZE)
+        if not batch:
+            break
         
-        logger.info("Dataset built: %s", dataset_id)
+        df_batch = pd.DataFrame(batch, columns=columns)
 
-        return final_paths, metadata
+        df_batch = preprocess(df_batch)
+
+        df_batch["partition"] = df_batch[cfg.date_column].apply(
+            lambda x: "train" if x <= train_end else ("val" if x <= val_end else "test")
+        )
+        encoded_df = transform_xgb(df_batch, encoders)
+
+        if FEATURES is None:
+            
+            EXCLUDE = {TARGET_COL, cfg.date_column, "partition"}
+            FEATURES = [c for c in encoded_df.columns if c not in EXCLUDE]
+
+            
+        for partition in ["train", "val", "test"]:
+            parquet_df = df_batch[df_batch["partition"] == partition].drop(columns=["partition"])
+            
+            if not parquet_df.empty:
+                table = pa.Table.from_pandas(parquet_df, preserve_index=False)
+                if parquet_writers[partition] is None:
+                    parquet_writers[partition] = pq.ParquetWriter(tmp_paths[partition], table.schema)
+                
+                parquet_writers[partition].write_table(table)
+                row_counts[partition] += len(parquet_df)
+
+            libsvm_df = encoded_df[encoded_df["partition"] == partition].drop(columns=["partition"])
+            if not libsvm_df.empty:
+                if libsvm_writers[partition] is None:
+                    if FEATURES is None:
+                        raise RuntimeError("Feature columns must be established before writing libsvm files")
+                    libsvm_writers[partition] = LibSVMWriter(
+                        libsvm_paths[partition], FEATURES, TARGET_COL
+                    )
+                libsvm_writers[partition].write_batch(libsvm_df)
+        
+        batch_num += 1
+
+        del df_batch
+        del encoded_df
+
+        if batch_num % 50 == 0:
+            gc.collect()
+
+    for w in parquet_writers.values():
+        if w:
+            w.close()
+    
+    for w in libsvm_writers.values():
+        if w:
+            w.close()
+
+    final_memory = get_memory_usage_mb()
+    logger.info(
+        f"Final memory usage: {final_memory:.2f} MB (delta: {final_memory - initial_memory:.2f} MB)"
+    )
+    return columns, row_counts, FEATURES
+
+
+def build_dataset_cfg(cfg: DataLoader) -> Tuple[Dict[str, str], Dict[str, str], Dict[str, Any]]:
+    
+    try:
+        with get_connection() as conn:
+
+            # 1. validate ETL run
+            fetch_etl_run(conn, cfg.run_id)
+
+            # 2. load gold dataset
+            run_date = pd.to_datetime(cfg.run_date)
+            end_date = run_date
+
+            if run_date - pd.Timedelta(days=500) < BASE_DATE:
+                start_date = BASE_DATE
+            else:
+                start_date = run_date - pd.Timedelta(days=500)
+
+            train_end, val_end = compute_time_split(
+                start_date, end_date
+            )
+
+            build_id = compute_hash({
+                "pipeline_name": cfg.pipeline_name,
+                "run_date": cfg.run_date,
+                "feature_version": cfg.feature_version,
+                "run_id": cfg.run_id
+            })
+
+            build_dir = os.path.join(cfg.output_dir, f"{build_id}_build")
+            os.makedirs(build_dir, exist_ok=True)
+            clean_dir(build_dir)
+
+            parquet_paths = {
+                "train": os.path.join(build_dir, "train.parquet"),
+                "val": os.path.join(build_dir, "val.parquet"),
+                "test": os.path.join(build_dir, "test.parquet"),
+            }
+
+            parquet_tmp_paths = {k: v + ".tmp" for k, v in parquet_paths.items()}
+            
+            libsvm_paths = {
+                "train": os.path.join(build_dir, "train.libsvm"),
+                "val": os.path.join(build_dir, "val.libsvm"),
+                "test": os.path.join(build_dir, "test.libsvm"),
+            }
+            libsvm_tmp_paths = {k: v + ".tmp" for k, v in libsvm_paths.items()}
+            
+            encoders = build_encoder(conn, cfg, start_date, train_end)
+
+            columns, row_counts, features = load_gold_dataset(
+                conn, cfg, start_date, end_date,
+                train_end, val_end, parquet_tmp_paths, libsvm_tmp_paths, encoders
+            )
+
+            total_rows = sum(row_counts.values())
+
+            # 3. schema hash
+            schema_hash = compute_hash({
+                "columns": columns,
+            })
+
+            # 4. feature hash
+            feature_hash = compute_hash({
+                "feature_version": cfg.feature_version
+            })
+
+            # 5. dataset hash (CORE CONTRACT)
+            dataset_id = compute_hash({
+                "pipeline_name": cfg.pipeline_name,
+                "run_date": cfg.run_date,
+                "etl_run_id": cfg.run_id,
+                "schema_hash": schema_hash,
+                "feature_hash": feature_hash,
+                "row_count": total_rows
+            })
+
+            encoder_path = os.path.join(build_dir, "encoders.pkl")
+            features_path = os.path.join(build_dir, "features.json")
+            metadata_path = os.path.join(build_dir, "metadata.json")
+
+            final_dataset_dir = os.path.join(cfg.output_dir, dataset_id)
+
+            joblib.dump(encoders, encoder_path)
+            with open(features_path, "w") as f:
+                json.dump(features, f)
+
+            final_parquet_paths = {
+                "train": os.path.join(final_dataset_dir, "train.parquet"),
+                "val": os.path.join(final_dataset_dir, "val.parquet"),
+                "test": os.path.join(final_dataset_dir, "test.parquet"),
+            }
+
+            final_libsvm_paths = {
+                "train": os.path.join(final_dataset_dir, "train.libsvm"),
+                "val": os.path.join(final_dataset_dir, "val.libsvm"),
+                "test": os.path.join(final_dataset_dir, "test.libsvm"),
+            }
+
+            metadata = {
+                "dataset_id": dataset_id,
+                "pipeline_name": cfg.pipeline_name,
+                "paths": {
+                    "parquet": final_parquet_paths,
+                    "libsvm": final_libsvm_paths
+                },
+                "run_date": cfg.run_date,
+                "run_id": cfg.run_id,
+                "row_counts": {
+                    **row_counts, 
+                    "total": total_rows
+                },
+                "dataset_start_date": str(start_date.date()),
+                "dataset_end_date": str(end_date.date()),
+                "schema_hash": schema_hash,
+                "feature_hash": feature_hash,
+                "feature_version": cfg.feature_version,
+                "source_table": cfg.table_name,
+                "artifacts": {
+                    "encoder": os.path.basename(encoder_path),
+                    "features": os.path.basename(features_path),
+                    "metadata": os.path.basename(metadata_path)
+                }
+            }
+
+            with open(metadata_path, "w") as f:
+                json.dump(metadata, f, indent=2)
+            
+            final_dataset_dir = os.path.join(
+                cfg.output_dir,
+                dataset_id
+            )
+
+            os.rename(build_dir, final_dataset_dir)
+
+            logger.info("Dataset built: %s", dataset_id)
+
+            return final_parquet_paths, final_libsvm_paths, metadata
+        
+    except Exception as e:
+        logger.error(f"Error building dataset: {e}")
+        shutil.rmtree(build_dir, ignore_errors=True)
+        raise
     

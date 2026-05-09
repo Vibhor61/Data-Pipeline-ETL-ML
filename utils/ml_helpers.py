@@ -1,7 +1,6 @@
 import logging
 from datetime import datetime, timezone
 from typing import Optional
-import os
 
 logger = logging.getLogger(__name__)
 
@@ -230,9 +229,9 @@ def log_dataset(conn, meta: dict):
         "dataset_start_date": meta["dataset_start_date"],
         "dataset_end_date": meta["dataset_end_date"],
 
-        "train_path": meta["paths"]["train"],
-        "val_path": meta["paths"]["val"],
-        "test_path": meta["paths"]["test"],
+        "train_path": meta["paths"]["parquet"]["train"],
+        "val_path": meta["paths"]["parquet"]["val"],
+        "test_path": meta["paths"]["parquet"]["test"],
 
         "train_row_count": meta["row_counts"]["train"],
         "val_row_count": meta["row_counts"]["val"],

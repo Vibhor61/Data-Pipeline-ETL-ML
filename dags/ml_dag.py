@@ -181,21 +181,25 @@ def task_build_dataset(**context):
         output_dir="/opt/airflow/data/datasets"
     )
 
-    paths, meta = build_dataset_cfg(cfg)
+    paths, libsvm_paths, meta = build_dataset_cfg(cfg)
 
     with get_connection() as conn:
         log_dataset(conn, meta)
 
     logger.info("Dataset built at paths: %s", paths)
+    logger.info("LibSVM paths: %s", libsvm_paths)
 
     logger.info("Dataset built: dataset_id=%s, rows=%d",  meta["dataset_id"], meta["row_counts"]["total"])
 
     return {
         "run_id": run_id,
         "dataset_id": meta["dataset_id"],
-        "train_path": meta["paths"]["train"],
-        "val_path": meta["paths"]["val"],
-        "test_path": meta["paths"]["test"],
+        "train_path": meta["paths"]["parquet"]["train"],
+        "val_path": meta["paths"]["parquet"]["val"],
+        "test_path": meta["paths"]["parquet"]["test"],
+        "train_libsvm_path": meta["paths"]["libsvm"]["train"],
+        "val_libsvm_path": meta["paths"]["libsvm"]["val"],
+        "test_libsvm_path": meta["paths"]["libsvm"]["test"],
         "parent_mlflow_run_id": run_context["parent_mlflow_run_id"],
         "dataset_start_date": meta["dataset_start_date"],
         "dataset_end_date": meta["dataset_end_date"]
@@ -225,7 +229,9 @@ def task_train(**context):
             "run_id": dataset_context["run_id"],
             "dataset_id": dataset_context["dataset_id"],
             "train_path": dataset_context["train_path"],
-            "val_path": dataset_context["val_path"]
+            "val_path": dataset_context["val_path"],
+            "train_libsvm_path": dataset_context["train_libsvm_path"],
+            "val_libsvm_path": dataset_context["val_libsvm_path"]
         }
     )
 

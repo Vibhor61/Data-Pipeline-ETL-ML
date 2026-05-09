@@ -1,13 +1,3 @@
-"""
-ML Validation Schema
-
-Defines the post processing gold ML dataset contract and runtime sanity checks 
-
-Core design principles:
-- Critical checks must pass (fail pipeline)
-- Soft checks logged for observability (do not fail)
-"""
-
 import pandera as pa
 from pandera import Check
 from pandera.errors import SchemaErrors
@@ -98,8 +88,6 @@ SoftFeatureSchema = pa.DataFrameSchema(
 
 
 def validate_ml_dataset(df: pd.DataFrame, stage: str) -> None:
-    """
-    Validates the ML dataset against critical and soft checks.
 
     Args:
         df (pd.DataFrame): The ML dataset to validate.

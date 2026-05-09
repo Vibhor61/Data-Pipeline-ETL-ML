@@ -1,22 +1,9 @@
-"""
-ML Evaluation Pipeline
-
-Computes prediction quality metrics and logs evaluation artifacts to MLflow.
-
-Input: model predictions and run metadata
-Output: evaluation metrics and slice-level artifact reports
-
-Core design principles:
-- evaluation is traceable to a specific MLflow run
-- metrics expose both global and slice-level performance
-- failures are raised early for invalid input artifacts
-"""
-
 import numpy as np
 import pandas as pd
 import mlflow
 import os
 import tempfile
+import gc 
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 import logging
 
@@ -25,51 +12,20 @@ logger = logging.getLogger(__name__)
 TARGET_COL = "sales"
 STORE_COL = "store_id"
 DEPT_COL = "dept_id"
+
 def rmse(y_true, y_pred):
-    """
-    Compute root mean squared error.
-    Args:
-        y_true: true target values
-        y_pred: predicted target values
-    Returns:
-        float: RMSE score
-    """
     return np.sqrt(mean_squared_error(y_true, y_pred))
 
 
 def mape(y_true, y_pred):
-    """
-    Compute mean absolute percentage error.
-    Args:
-        y_true: true target values
-        y_pred: predicted target values
-    Returns:
-        float: MAPE percentage
-    """
     return np.mean(np.abs((y_true - y_pred) / (y_true + 1e-8))) * 100
 
 
 def wmape(y_true, y_pred):
-    """
-    Compute weighted mean absolute percentage error.
-    Args:
-        y_true: true target values
-        y_pred: predicted target values
-    Returns:
-        float: WMAPE score
-    """
     return np.sum(np.abs(y_true - y_pred)) / (np.sum(np.abs(y_true)) + 1e-8)
 
 
 def compute_slice_metrics(df: pd.DataFrame, group_col: str) -> pd.DataFrame:
-    """
-    Compute evaluation metrics aggregated by slice.
-    Args:
-        df (pd.DataFrame): dataset containing actual and prediction columns
-        group_col (str): column name to group by for slice metrics
-    Returns:
-        pd.DataFrame: aggregated slice performance metrics
-    """
     metrics_df = (
         df.groupby(group_col).apply(
             lambda x: pd.Series({
@@ -85,24 +41,12 @@ def compute_slice_metrics(df: pd.DataFrame, group_col: str) -> pd.DataFrame:
     return metrics_df
 
 
-def evaluate_pipeline(pred_path: str, run_id: str, dataset_id: str, train_mlflow_run_id: str, pred_mlflow_run_id: str, mlflow_run_id: str):
-    """
-    Run evaluation for a prediction artifact and log metrics to MLflow.
-    Args:
-        pred_path (str): path to prediction parquet file
-        run_id (str): current evaluation pipeline run id
-        dataset_id (str): dataset identifier used at training time
-        train_mlflow_run_id (str): MLflow run id for the trained model
-        pred_mlflow_run_id (str): MLflow run id for the prediction
-        mlflow_run_id (str): MLflow run id for the evaluation
-    Returns:
-        None
-    Raises:
-        RuntimeError: when no active MLflow run exists
-        ValueError: when prediction file columns are invalid or dataset mismatch occurs
-    """
+def evaluate_pipeline(pred_path: str, run_id: str, dataset_id: str, train_mlflow_run_id: str, pred_mlflow_run_id: str, mlflow_run_id: str, dataset_dir: str = None):
     logger.info("Evaluation pipeline started for run_id=%s dataset_id=%s", run_id, dataset_id)
     
+    if dataset_dir is None:
+        dataset_dir = os.path.dirname(pred_path)
+
     active_run = mlflow.active_run()
     if active_run is None:
         raise RuntimeError("No active MLflow run")
@@ -114,7 +58,7 @@ def evaluate_pipeline(pred_path: str, run_id: str, dataset_id: str, train_mlflow
         
     mlflow.set_tag("source_train_run_id", train_mlflow_run_id)
     mlflow.set_tag("source_pred_run_id", pred_mlflow_run_id)
-
+    
     train_run = mlflow.get_run(train_mlflow_run_id)
     trained_dataset_id = train_run.data.params.get("dataset_id")
     if trained_dataset_id != dataset_id:
@@ -123,9 +67,20 @@ def evaluate_pipeline(pred_path: str, run_id: str, dataset_id: str, train_mlflow
             f"evaluate requested on {dataset_id}"
         )
 
+    pred_run = mlflow.get_run(pred_mlflow_run_id)
+
+    pred_source_train_run = pred_run.data.tags.get(
+        "source_train_run_id"
+    )
+
+    if pred_source_train_run != train_mlflow_run_id:
+        raise ValueError(
+            "Prediction run was generated from a different training run"
+        )
+    
     pred_df = pd.read_parquet(pred_path)
 
-    required_cols = {"actual", "prediction"}
+    required_cols = {"actual", "prediction", STORE_COL, DEPT_COL}
     if not required_cols.issubset(pred_df.columns):
         raise ValueError(
             f"Predictions file must contain columns {required_cols}"
@@ -168,4 +123,6 @@ def evaluate_pipeline(pred_path: str, run_id: str, dataset_id: str, train_mlflow
         mlflow.log_artifact(store_path, artifact_path="slice_metrics")
         mlflow.log_artifact(dept_path, artifact_path="slice_metrics")
 
+    del pred_df, store_metrics, dept_metrics, y_true, y_pred, errors
+    gc.collect()
     logger.info("Evaluation completed run_id=%s", run_id)

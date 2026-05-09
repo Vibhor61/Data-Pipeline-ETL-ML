@@ -1,23 +1,10 @@
-"""
-ML Prediction Pipeline
-
-Loads trained artifacts and generates predictions for a test dataset.
-
-Input: trained MLflow run artifacts and test dataset
-Output: prediction parquet file and MLflow prediction artifact
-
-Core design principles:
-- prediction artifacts are loaded from the same MLflow run as training
-- input dataset integrity checks guard against mismatched schemas
-- predictions are persisted and logged for reproducibility
-"""
-
 import os
 import json
 import tempfile
 import pandas as pd
 import logging
 import joblib
+import gc
 
 import mlflow
 import mlflow.lightgbm
@@ -30,37 +17,32 @@ logger = logging.getLogger(__name__)
 TARGET_COL = "sales"
 
 
-def load_artifacts(mlflow_run_id: str):
-    """
-    Download model artifacts from a completed MLflow run.
-    Args:
-        mlflow_run_id (str): MLflow run identifier
-    Returns:
-        tuple: loaded encoders dictionary and feature list
-    """
-    client = mlflow.tracking.MlflowClient()
+def load_artifacts_from_dataset(dataset_dir: str):
+    encoder_path = os.path.join(dataset_dir, "encoders.pkl")
+    features_path = os.path.join(dataset_dir, "features.json")
+    metadata_path = os.path.join(dataset_dir, "metadata.json")
+
+    if not os.path.exists(encoder_path):
+        raise FileNotFoundError(f"Encoders not found in {dataset_dir}")
     
-    with tempfile.TemporaryDirectory() as tmpdir:
-        client.download_artifacts(mlflow_run_id, "encoders.pkl", tmpdir)
-        client.download_artifacts(mlflow_run_id, "features.json", tmpdir)
+    if  not os.path.exists(features_path):
+        raise FileNotFoundError(f"Features not found in {dataset_dir}")
+    
+    if not os.path.exists(metadata_path):
+        raise FileNotFoundError(f"Metadata not found in {dataset_dir}")
+    
+    encoders = joblib.load(encoder_path)
+    
+    with open(features_path, "r") as f:
+        features = json.load(f)
+    
+    with open(metadata_path, "r") as f:
+        metadata = json.load(f)
 
-        encoders = joblib.load(os.path.join(tmpdir, "encoders.pkl"))
-        features = json.load(open(os.path.join(tmpdir, "features.json")))
-
-    return encoders, features
+    return encoders, features, metadata
 
 
 def load_model(mlflow_run_id: str):
-    """
-    Load the best trained model from the given MLflow run.
-    Args:
-        mlflow_run_id (str): MLflow run identifier
-    Returns:
-        object: loaded model instance
-    Raises:
-        ValueError: if the best_model parameter is missing or unknown
-    """
-
     run = mlflow.get_run(mlflow_run_id)
     best_model = run.data.params.get("best_model")
 
@@ -74,22 +56,11 @@ def load_model(mlflow_run_id: str):
         raise ValueError(f"Unknown best_model: {best_model}")
     
 
-def predict_pipeline(test_path: str, run_id: str, dataset_id: str, train_mlflow_run_id: str, mlflow_run_id: str):
-    """
-    Run the model prediction pipeline and log prediction artifacts.
-    Args:
-        test_path (str): path to test dataset parquet file
-        run_id (str): prediction pipeline run identifier
-        dataset_id (str): expected dataset identifier used at training time
-        train_mlflow_run_id (str): MLflow run id for the trained model
-    Returns:
-        str: path to the generated prediction parquet file
-    Raises:
-        RuntimeError: when no active MLflow run exists
-        ValueError: when dataset mismatch or model artifacts are invalid
-    """
-
+def predict_pipeline(test_path: str, run_id: str, dataset_id: str, train_mlflow_run_id: str, mlflow_run_id: str, dataset_dir: str = None):
     logger.info("Prediction pipeline started for run_id=%s, train_mlflow_run_id=%s and dataset_id=%s", run_id, train_mlflow_run_id, dataset_id)
+
+    if dataset_dir is None:
+        dataset_dir = os.path.dirname(test_path)
 
     active_run = mlflow.active_run()
     if active_run is None:
@@ -101,7 +72,6 @@ def predict_pipeline(test_path: str, run_id: str, dataset_id: str, train_mlflow_
         )
     
     mlflow.set_tag("source_train_run_id", train_mlflow_run_id)
-    # Silent failure if trained on some dataset but evaluating on other without checking   
     train_run = mlflow.get_run(train_mlflow_run_id)
 
     trained_dataset_id = train_run.data.params.get("dataset_id")
@@ -111,32 +81,39 @@ def predict_pipeline(test_path: str, run_id: str, dataset_id: str, train_mlflow_
             f"but prediction requested on {dataset_id}"
         )
 
-
-    test_df = pd.read_parquet(test_path)
-    test_df = preprocess(test_df)
-    X_test = test_df.drop(columns=[TARGET_COL])
-
-    encoder, features = load_artifacts(train_mlflow_run_id)
+    encoders, features, _ = load_artifacts_from_dataset(dataset_dir)
     model, model_type = load_model(train_mlflow_run_id)
     
+    test_df = pd.read_parquet(test_path)
+    test_df = preprocess(test_df)
+    missing_features = set(features) - set(test_df.columns)
+    if missing_features:
+        raise ValueError(f"Missing features in test data: {missing_features}")
+    
+    X_test = test_df[features]
     if model_type == "lgb":
-        X_test = categorical_cols_cast(X_test)
+        feature_df = categorical_cols_cast(X_test)
 
     elif model_type == "xgb":
-        X_test = transform_xgb(X_test, encoder)
+        feature_df = transform_xgb(X_test, encoders)
 
-    preds = model.predict(X_test[features])
+    preds = model.predict(feature_df)
     
-    pred_df = test_df.copy()
-    pred_df["prediction"] = preds
-    pred_df["actual"] = pred_df[TARGET_COL]
+    prediction_df = pd.DataFrame({
+        "prediction": preds,
+        "actual": test_df[TARGET_COL],
+        "store_id": test_df["store_id"],
+        "dept_id": test_df["dept_id"],
+    })
 
-    pred_path = os.path.join(os.path.dirname(test_path), "predictions.parquet")
-    pred_df.to_parquet(pred_path, index=False)
+    pred_path = os.path.join(dataset_dir, "predictions.parquet")
+    prediction_df.to_parquet(pred_path, index=False)
 
     mlflow.log_artifact(pred_path, artifact_path="predictions")
-    mlflow.log_metric("prediction_rows", len(pred_df))
+    mlflow.log_metric("prediction_rows", len(prediction_df))
 
-    logger.info("Prediction completed rows=%s", len(pred_df))
+    logger.info("Prediction completed rows=%s", len(prediction_df))
 
+    del test_df, feature_df, prediction_df, preds, model
+    gc.collect()
     return pred_path
