@@ -15,7 +15,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from utils.db import get_connection
-from ML.preprocess import preprocess, fit_encoder, transform_xgb, CATEGORICAL_COLS
+from ML.preprocess import preprocess, transform_xgb, CATEGORICAL_COLS, ALL_COLS
 
 logger = logging.getLogger(__name__)
 BASE_DATE = pd.to_datetime("2011-01-29")
@@ -87,6 +87,9 @@ def fetch_etl_run(conn, run_id:str) -> pd.Series:
 
 
 def compute_time_split(start_date: pd.Timestamp, end_date: pd.Timestamp):
+    start_date = pd.to_datetime(start_date)
+    end_date = pd.to_datetime(end_date)
+    
     total_days = (end_date - start_date).days
     train_end = start_date + pd.Timedelta(days=int(total_days * 0.7))
     val_end = start_date + pd.Timedelta(days=int(total_days * 0.85))
@@ -116,6 +119,11 @@ def clean_dir(dataset_dir: str):
         raise
 
 
+def finalize_tmp_files(tmp_paths: Dict[str, str], final_paths: Dict[str, str]):
+    for k in tmp_paths:
+        os.rename(tmp_paths[k], final_paths[k])
+
+
 def build_encoder(conn, cfg: DataLoader, start_date, train_end_date):
 
     logger.info(f"Fitting encoder for {start_date} to {train_end_date}")
@@ -133,8 +141,7 @@ def build_encoder(conn, cfg: DataLoader, start_date, train_end_date):
     cursor.itersize = CURSOR_BATCH_SIZE
     cursor.execute(query, (start_date, train_end_date))
 
-    columns = [desc[0] for desc in cursor.description]
-
+    columns = CATEGORICAL_COLS
     logger.info("Streaming data for encoder fitting")
 
     while True:
@@ -173,8 +180,9 @@ def build_encoder(conn, cfg: DataLoader, start_date, train_end_date):
 
 
 def load_gold_dataset(conn, cfg: DataLoader, start_date, end_date, train_end, val_end, tmp_paths, libsvm_paths, encoders ):
+    columns = ALL_COLS
     query = f"""
-        SELECT *
+        SELECT {', '.join(ALL_COLS)}
         FROM {cfg.table_name}
         WHERE {cfg.date_column}
             BETWEEN %s AND %s
@@ -185,9 +193,8 @@ def load_gold_dataset(conn, cfg: DataLoader, start_date, end_date, train_end, va
     cursor.itersize = CURSOR_BATCH_SIZE
     cursor.execute(query, (start_date, end_date))
     
-    columns = [desc[0] for desc in cursor.description]
-    
     FEATURES = None
+    SCHEMA = None
     parquet_writers = {"train": None, "val": None, "test": None}
     libsvm_writers = {"train": None, "val": None, "test": None}
 
@@ -202,37 +209,57 @@ def load_gold_dataset(conn, cfg: DataLoader, start_date, end_date, train_end, va
         if not batch:
             break
         
+        logger.info(f"Batch size = {len(batch)} RAM = {get_memory_usage_mb():.2f}MB")
         df_batch = pd.DataFrame(batch, columns=columns)
-
+        
+        logger.info(f"Batch loaded into DataFrame RAM = {get_memory_usage_mb():.2f}MB")
         df_batch = preprocess(df_batch)
-
+        
+        logger.info(f"Batch preprocessed RAM = {get_memory_usage_mb():.2f}MB")
+        df_batch["run_date"] = pd.to_datetime(df_batch[cfg.date_column])
         df_batch["partition"] = df_batch[cfg.date_column].apply(
             lambda x: "train" if x <= train_end else ("val" if x <= val_end else "test")
         )
-        encoded_df = transform_xgb(df_batch, encoders)
+        df_batch = df_batch.drop(columns=["run_date"])
 
+        encoded_df = transform_xgb(df_batch, encoders)
+        logger.info(f"Batch encoded RAM = {get_memory_usage_mb():.2f}MB")
+        
         if FEATURES is None:
             
             EXCLUDE = {TARGET_COL, cfg.date_column, "partition"}
             FEATURES = [c for c in encoded_df.columns if c not in EXCLUDE]
 
-            
+        if SCHEMA is None:
+            SCHEMA = pa.Schema.from_pandas(df_batch.drop(columns=["partition"]))
+
         for partition in ["train", "val", "test"]:
+            
             parquet_df = df_batch[df_batch["partition"] == partition].drop(columns=["partition"])
+            logger.info(f"Partition {partition} size: {len(parquet_df)}")
             
             if not parquet_df.empty:
-                table = pa.Table.from_pandas(parquet_df, preserve_index=False)
                 if parquet_writers[partition] is None:
-                    parquet_writers[partition] = pq.ParquetWriter(tmp_paths[partition], table.schema)
-                
+                    parquet_writers[partition] = pq.ParquetWriter(
+                        tmp_paths[partition],
+                        SCHEMA
+                    )
+                                
+                table = pa.Table.from_pandas(
+                    parquet_df,
+                    schema=SCHEMA,
+                    preserve_index=False,
+                    safe=True
+                )
+
                 parquet_writers[partition].write_table(table)
                 row_counts[partition] += len(parquet_df)
-
+               
             libsvm_df = encoded_df[encoded_df["partition"] == partition].drop(columns=["partition"])
+            logger.info(f"Partition {partition} encoded size: {len(libsvm_df)}")
+            
             if not libsvm_df.empty:
                 if libsvm_writers[partition] is None:
-                    if FEATURES is None:
-                        raise RuntimeError("Feature columns must be established before writing libsvm files")
                     libsvm_writers[partition] = LibSVMWriter(
                         libsvm_paths[partition], FEATURES, TARGET_COL
                     )
@@ -245,6 +272,7 @@ def load_gold_dataset(conn, cfg: DataLoader, start_date, end_date, train_end, va
 
         if batch_num % 50 == 0:
             gc.collect()
+        logger.info(f"[GC_CLEANUP] batch={batch_num} RAM={get_memory_usage_mb():.2f} MB")
 
     for w in parquet_writers.values():
         if w:
@@ -273,10 +301,10 @@ def build_dataset_cfg(cfg: DataLoader) -> Tuple[Dict[str, str], Dict[str, str], 
             run_date = pd.to_datetime(cfg.run_date)
             end_date = run_date
 
-            if run_date - pd.Timedelta(days=500) < BASE_DATE:
+            if run_date - pd.Timedelta(days=365) < BASE_DATE:
                 start_date = BASE_DATE
             else:
-                start_date = run_date - pd.Timedelta(days=500)
+                start_date = run_date - pd.Timedelta(days=365)
 
             train_end, val_end = compute_time_split(
                 start_date, end_date
@@ -337,15 +365,7 @@ def build_dataset_cfg(cfg: DataLoader) -> Tuple[Dict[str, str], Dict[str, str], 
                 "row_count": total_rows
             })
 
-            encoder_path = os.path.join(build_dir, "encoders.pkl")
-            features_path = os.path.join(build_dir, "features.json")
-            metadata_path = os.path.join(build_dir, "metadata.json")
-
             final_dataset_dir = os.path.join(cfg.output_dir, dataset_id)
-
-            joblib.dump(encoders, encoder_path)
-            with open(features_path, "w") as f:
-                json.dump(features, f)
 
             final_parquet_paths = {
                 "train": os.path.join(final_dataset_dir, "train.parquet"),
@@ -359,6 +379,15 @@ def build_dataset_cfg(cfg: DataLoader) -> Tuple[Dict[str, str], Dict[str, str], 
                 "test": os.path.join(final_dataset_dir, "test.libsvm"),
             }
 
+            encoder_path = os.path.join(build_dir, "encoders.pkl")
+            features_path = os.path.join(build_dir, "features.json")
+            metadata_path = os.path.join(build_dir, "metadata.json")
+
+            joblib.dump(encoders, encoder_path)
+            with open(features_path, "w") as f:
+                json.dump(features, f)
+
+            
             metadata = {
                 "dataset_id": dataset_id,
                 "pipeline_name": cfg.pipeline_name,
@@ -388,10 +417,10 @@ def build_dataset_cfg(cfg: DataLoader) -> Tuple[Dict[str, str], Dict[str, str], 
             with open(metadata_path, "w") as f:
                 json.dump(metadata, f, indent=2)
             
-            final_dataset_dir = os.path.join(
-                cfg.output_dir,
-                dataset_id
-            )
+            finalize_tmp_files(parquet_tmp_paths, parquet_paths)
+            finalize_tmp_files(libsvm_tmp_paths, libsvm_paths)
+            if os.path.exists(final_dataset_dir):
+                shutil.rmtree(final_dataset_dir)
 
             os.rename(build_dir, final_dataset_dir)
 
@@ -401,6 +430,7 @@ def build_dataset_cfg(cfg: DataLoader) -> Tuple[Dict[str, str], Dict[str, str], 
         
     except Exception as e:
         logger.error(f"Error building dataset: {e}")
-        shutil.rmtree(build_dir, ignore_errors=True)
+        if build_dir and os.path.exists(build_dir):
+            shutil.rmtree(build_dir, ignore_errors=True)
         raise
     

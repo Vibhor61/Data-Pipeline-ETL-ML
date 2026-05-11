@@ -15,7 +15,6 @@ import lightgbm as lgb
 import xgboost as xgb
 from typing import Optional
 
-from ML.preprocess import categorical_cols_cast
 from ML.validate import validate_ml_dataset
 
 logger = logging.getLogger(__name__)
@@ -42,33 +41,13 @@ def rmse(y_true, y_pred):
     return np.sqrt(mean_squared_error(y_true, y_pred))
 
 
-def lgbm_train(train_df, val_df, features):
-    log_memory_usage("LGBM_TRAIN_START", f"Features: {len(features)}")
+def lgbm_train(train_libsvm_path, val_libsvm_path):
+    log_memory_usage("LGBM_TRAIN_START")
 
-    X_train = categorical_cols_cast(train_df[features])
-    y_train = train_df[TARGET_COL]
-
-    X_val = categorical_cols_cast(val_df[features])
-    y_val = val_df[TARGET_COL]
-
-    del train_df, val_df
-    gc.collect()
+    train_data = lgb.Dataset(train_libsvm_path, params={"format": "libsvm", "free_raw_data": True})
+    val_data = lgb.Dataset(val_libsvm_path, params={"format": "libsvm", "free_raw_data": True})
 
     log_memory_usage("LGBM_AFTER_DATA_EXTRACTION", "Train/val DFs deleted")
-
-    train_data = lgb.Dataset(
-        X_train,
-        label=y_train,
-        categorical_feature="auto",
-        free_raw_data=True
-    )
-
-    val_data = lgb.Dataset(
-        X_val,
-        label=y_val,
-        categorical_feature="auto",
-        free_raw_data=True
-    )
 
     params = {
         "objective": "regression",
@@ -87,29 +66,41 @@ def lgbm_train(train_df, val_df, features):
         params,
         train_data,
         valid_sets=[val_data],
+        valid_names=["validation"],
         num_boost_round=1000,
-        early_stopping_rounds=50,
-        verbose_eval=100
+        callbacks=[
+            lgb.early_stopping(50),
+            lgb.log_evaluation(100)
+        ]
     )
 
     log_memory_usage("LGBM_AFTER_TRAIN", "Model trained")
 
-    pred = model.predict(X_val)
+    val_data.construct()
+    X_val = val_data.get_data()
+    y_val = val_data.get_label()
+
+    pred = model.predict(X_val, num_iteration=model.best_iteration)
     score = rmse(y_val, pred)
-    del train_data, val_data, X_train, y_train
-    del X_val, y_val, pred
+
+    del train_data
+    del val_data
+    del pred
+    del y_val
+    del X_val
+
     gc.collect()
-    
+
     log_memory_usage("LGBM_TRAIN_END", f"RMSE: {score:.4f}")
     
     return model, params, score
 
 
-def xgboost_train(train_libsvm_path, val_libsvm_path, y_val):
+def xgboost_train(train_libsvm_path, val_libsvm_path):
     log_memory_usage("XGBOOST_TRAIN_START", f"Train: {train_libsvm_path}")
 
-    train_dmatrix = xgb.DMatrix(f"{train_libsvm_path}#train.cache")
-    val_dmatrix = xgb.DMatrix(f"{val_libsvm_path}#val.cache")
+    train_dmatrix = xgb.DMatrix(f"{train_libsvm_path}?format=libsvm#train.cache")
+    val_dmatrix = xgb.DMatrix(f"{val_libsvm_path}?format=libsvm#val.cache")
     
     log_memory_usage("XGBOOST_DMATRIX_LOADED", "DMatrices created")
 
@@ -127,19 +118,21 @@ def xgboost_train(train_libsvm_path, val_libsvm_path, y_val):
         params,
         train_dmatrix,
         num_boost_round=1000,
-        evals=[(val_dmatrix, "validation")],
+        evals=[(val_dmatrix, "validation")],  
         early_stopping_rounds=50,
         verbose_eval=100
     )
     
     log_memory_usage("XGBOOST_AFTER_TRAIN", "Model trained")
     
+    y_val = val_dmatrix.get_label()
     preds = model.predict(val_dmatrix)
     score = rmse(y_val, preds)
 
     del train_dmatrix
     del val_dmatrix
     del preds
+    del y_val
     gc.collect()
     log_memory_usage("XGBOOST_TRAIN_END", f"RMSE: {score:.4f}")
     
@@ -160,7 +153,7 @@ def load_dataset_artifacts(dataset_dir: str):
     return metadata, features
 
 
-def train_pipeline(train_df: pd.DataFrame, val_df: pd.DataFrame, train_libsvm_path: str, val_libsvm_path: str, run_id: str, dataset_id: str, mlflow_run_id: str, dataset_dir: str):
+def train_pipeline(val_df: pd.DataFrame, train_libsvm_path: str, val_libsvm_path: str, run_id: str, dataset_id: str, mlflow_run_id: str, dataset_dir: str):
     logger.info("Starting pipeline run for run_id=%s dataset_id=%s", run_id, dataset_id)
     log_memory_usage("PIPELINE_START", f"run_id={run_id}, dataset_id={dataset_id}")
     
@@ -178,7 +171,6 @@ def train_pipeline(train_df: pd.DataFrame, val_df: pd.DataFrame, train_libsvm_pa
     logger.info("Loaded dataset artifacts")
     log_memory_usage("PIPELINE_ARTIFACTS_LOADED", f"Features: {len(features)}")
     
-    validate_ml_dataset(train_df, stage="train")
     validate_ml_dataset(val_df, stage="validation")
 
     mlflow.log_params({
@@ -193,27 +185,23 @@ def train_pipeline(train_df: pd.DataFrame, val_df: pd.DataFrame, train_libsvm_pa
 
     
     baseline_pred = val_df["sales_lag_7"].values
-    baseline_score = rmse(val_df[TARGET_COL], baseline_pred)
+    baseline_score = rmse(val_df[TARGET_COL].values, baseline_pred)
     mlflow.log_metric("baseline_rmse", baseline_score)
     del baseline_pred
     gc.collect()
     log_memory_usage("PIPELINE_BASELINE_COMPUTED", f"Baseline RMSE: {baseline_score:.4f}")
 
     # LightGBM with categorical feature support
-    lgb_model, lgb_params, lgb_score = lgbm_train(train_df, val_df, features)
+    lgb_model, lgb_params, lgb_score = lgbm_train(train_libsvm_path, val_libsvm_path)
     
     mlflow.log_metric("lgb_val_rmse", lgb_score)
     mlflow.log_params({f"lgb_{k}": v for k, v in lgb_params.items()})
     log_memory_usage("PIPELINE_LGBM_COMPLETED", f"LGB RMSE: {lgb_score:.4f}")
-    del lgb_model
-    gc.collect()
-
+   
     # XGBoost with ordinal encoding for categorical features
-    y_val_xgb = val_df[TARGET_COL].copy()
     xgb_model, xgb_params, xgb_score = xgboost_train(
         train_libsvm_path,
-        val_libsvm_path,
-        y_val_xgb
+        val_libsvm_path
     )
 
     mlflow.log_metric("xgb_val_rmse", xgb_score)
@@ -235,8 +223,7 @@ def train_pipeline(train_df: pd.DataFrame, val_df: pd.DataFrame, train_libsvm_pa
     mlflow.log_metric("best_val_rmse", best_rmse)
 
     del xgb_model
-    del y_val_xgb
-    del train_df
+    del lgb_model
     del val_df
     gc.collect()
     log_memory_usage("PIPELINE_MODELS_CLEANED", f"Best model: {best_name}, RMSE: {best_rmse:.4f}")
@@ -264,14 +251,12 @@ def train_main(run_id: str, dataset_id: str, train_path: str, val_path: str, tra
 
     initial_memory_rss = log_memory_usage("MAIN_START", f"run_id={run_id}, dataset_id={dataset_id}")
     
-    train_df = pd.read_parquet(train_path)
     val_df = pd.read_parquet(val_path)
     
-    log_memory_usage("MAIN_DATA_LOADED", f"Train shape: {train_df.shape}, Val shape: {val_df.shape}")
+    log_memory_usage("MAIN_DATA_LOADED, Val shape: {val_df.shape}")
 
     try:
         train_pipeline(
-            train_df=train_df,
             val_df=val_df,
             train_libsvm_path=train_libsvm_path,
             val_libsvm_path=val_libsvm_path,
@@ -281,11 +266,9 @@ def train_main(run_id: str, dataset_id: str, train_path: str, val_path: str, tra
             dataset_dir=dataset_dir
         )
     finally:
-        # Ensure proper cleanup even if training fails
-        del train_df
         del val_df
         gc.collect()
 
-    final_memory_rss = log_memory_usage("MAIN_END", f"Training completed")
+    final_memory_rss = log_memory_usage("MAIN_END Training completed")
     memory_delta_rss = final_memory_rss - initial_memory_rss
     logger.info(f"Memory delta - RSS: {memory_delta_rss:+.3f} GB")

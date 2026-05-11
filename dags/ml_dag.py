@@ -3,6 +3,8 @@ from airflow.operators.python import PythonOperator
 from datetime import datetime
 import logging
 import mlflow
+import sys 
+from pathlib import Path
 from typing import Optional
 from utils.db import get_connection
 from utils.ml_helpers import(
@@ -13,6 +15,10 @@ from utils.ml_helpers import(
     finish_ml_stage,
     update_ml_pipeline_status
 )
+
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 
 from ML.train import train_main
 from ML.data_loader import DataLoader,build_dataset_cfg
@@ -169,7 +175,7 @@ def task_build_dataset(**context):
     ti = context["ti"]
     run_context = ti.xcom_pull(task_ids="create_run")
     run_date = run_context["run_date"]
-    run_id = run_context["run_id"]   # airflow gives this
+    run_id = str(run_context["run_id"])   # airflow gives this
 
     cfg = DataLoader(
         run_id=run_id,
@@ -192,8 +198,8 @@ def task_build_dataset(**context):
     logger.info("Dataset built: dataset_id=%s, rows=%d",  meta["dataset_id"], meta["row_counts"]["total"])
 
     return {
-        "run_id": run_id,
-        "dataset_id": meta["dataset_id"],
+        "run_id": str(run_id),
+        "dataset_id": str(meta["dataset_id"]),
         "train_path": meta["paths"]["parquet"]["train"],
         "val_path": meta["paths"]["parquet"]["val"],
         "test_path": meta["paths"]["parquet"]["test"],
@@ -220,14 +226,14 @@ def task_train(**context):
 
     result = run_stage(
         stage="train",
-        run_id=dataset_context["run_id"],
-        dataset_id=dataset_context["dataset_id"],
+        run_id=str(dataset_context["run_id"]),
+        dataset_id=str(dataset_context["dataset_id"]),
         parent_mlflow_run_id=dataset_context["parent_mlflow_run_id"],
         source_mlflow_run_id=None,
         stage_fn=train_main,
         stage_kwargs={
-            "run_id": dataset_context["run_id"],
-            "dataset_id": dataset_context["dataset_id"],
+            "run_id": str(dataset_context["run_id"]),
+            "dataset_id": str(dataset_context["dataset_id"]),
             "train_path": dataset_context["train_path"],
             "val_path": dataset_context["val_path"],
             "train_libsvm_path": dataset_context["train_libsvm_path"],
@@ -256,15 +262,15 @@ def task_predict(**context):
 
     result = run_stage(
         stage="predict",
-        run_id=dataset_context["run_id"],
-        dataset_id=dataset_context["dataset_id"],
+        run_id=str(dataset_context["run_id"]),
+        dataset_id=str(dataset_context["dataset_id"]),
         parent_mlflow_run_id=dataset_context["parent_mlflow_run_id"],
         source_mlflow_run_id=dataset_context["train_mlflow_run_id"],
         stage_fn=predict_pipeline,
         stage_kwargs={
             "test_path": dataset_context["test_path"],
-            "run_id": dataset_context["run_id"],
-            "dataset_id": dataset_context["dataset_id"],
+            "run_id": str(dataset_context["run_id"]),
+            "dataset_id": str(dataset_context["dataset_id"]),
             "train_mlflow_run_id": _safe_str(dataset_context["train_mlflow_run_id"])
         }
     )
@@ -290,15 +296,15 @@ def task_evaluate(**context):
 
     run_stage(
         stage="evaluate",
-        run_id=dataset_context["run_id"],
-        dataset_id=dataset_context["dataset_id"],
+        run_id=str(dataset_context["run_id"]),
+        dataset_id=str(dataset_context["dataset_id"]),
         parent_mlflow_run_id=dataset_context["parent_mlflow_run_id"],
         source_mlflow_run_id=dataset_context["pred_mlflow_run_id"],
         stage_fn=evaluate_pipeline,
         stage_kwargs={
             "pred_path": dataset_context["pred_path"],
-            "run_id": dataset_context["run_id"],
-            "dataset_id": dataset_context["dataset_id"],
+            "run_id": str(dataset_context["run_id"]),
+            "dataset_id": str(dataset_context["dataset_id"]),
             "pred_mlflow_run_id": _safe_str(dataset_context["pred_mlflow_run_id"]),
             "train_mlflow_run_id": _safe_str(dataset_context["train_mlflow_run_id"])
         }
@@ -316,7 +322,7 @@ def task_finalize(**context):
     ti = context["ti"]
     dataset_context = ti.xcom_pull(task_ids="evaluate")
 
-    run_id = dataset_context["run_id"]
+    run_id = str(dataset_context["run_id"])
 
     with get_connection() as conn:
         update_ml_pipeline_status(

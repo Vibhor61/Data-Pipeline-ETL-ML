@@ -22,7 +22,7 @@ def get_etl_run_id(conn, run_date: str):
     if result is None:
         raise ValueError(f"No run_id found for run_date {run_date}")
     
-    return result[0]
+    return str(result[0])
 
 
 def create_or_get_ml_pipeline_run(
@@ -36,6 +36,7 @@ def create_or_get_ml_pipeline_run(
     Creates or resets logical pipeline run for this run_id.
     Idempotent via ON CONFLICT; ensures the run is marked running.
     """
+    run_id = str(run_id)
     query = """
     INSERT INTO ml_pipeline_runs (
         run_id,
@@ -72,6 +73,7 @@ def update_ml_pipeline_status(
     Updates ML pipeline run status (running, success, failed).
     Raises ValueError for invalid statuses.
     """
+    run_id = str(run_id)
     if status not in ("running", "success", "failed"):
         raise ValueError("Invalid status")
 
@@ -106,6 +108,8 @@ def start_ml_stage(
     Marks an ML stage as running.
     Idempotent via ON CONFLICT on (run_id, dataset_id, stage).
     """
+    run_id = str(run_id)
+    dataset_id = str(dataset_id)
     query = """
     INSERT INTO ml_runs (
         ml_run_id,
@@ -149,6 +153,8 @@ def finish_ml_stage(
     if status not in ("success", "failed"):
         raise ValueError("Invalid status")
     
+    run_id = str(run_id)
+    dataset_id = str(dataset_id)
     sql = """
         UPDATE ml_runs
         SET status = %s, error_message = %s, mlflow_run_id = %s, ended_at = NOW()
@@ -168,6 +174,10 @@ def log_dataset(conn, meta: dict):
     Insert or overwrite dataset metadata for deterministic dataset_id.
     Ensures metadata stays aligned with overwritten parquet files.
     """
+    # Ensure all IDs are strings
+    meta["dataset_id"] = str(meta["dataset_id"])
+    meta["run_id"] = str(meta["run_id"])
+    
     query = """
         INSERT INTO ml_dataset (
             dataset_id,

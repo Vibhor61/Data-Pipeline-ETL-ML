@@ -40,11 +40,11 @@ CriticalFeatureSchema = pa.DataFrameSchema(
                         error="Lag features contain negative values"
                 ),
                 Check(
-                        lambda df: (df[ROLL_MEAN_COLS] >= 0).values.all(),
+                        lambda df: (df[ROLL_MEAN_COLS].dropna() >= 0).values.all(),
                         error = "Rolling mean features contain negative values"
                 ),
                 Check(
-                        lambda df: (df[ROLL_STD_COLS] >= 0).values.all(),
+                        lambda df: (df[ROLL_STD_COLS].dropna() >= 0).values.all(),
                         error = "Rolling std features contain negative values"
                 ),
         ],
@@ -88,7 +88,7 @@ SoftFeatureSchema = pa.DataFrameSchema(
 
 
 def validate_ml_dataset(df: pd.DataFrame, stage: str) -> None:
-
+    """
     Args:
         df (pd.DataFrame): The ML dataset to validate.
         stage (str): The pipeline stage (e.g., "train", "validation") for logging context.
@@ -105,4 +105,4 @@ def validate_ml_dataset(df: pd.DataFrame, stage: str) -> None:
         SoftFeatureSchema.validate(df, lazy=True)
     except Exception as e:
         logger.warning("Soft schema warnings at %s : %s", stage, e.failure_cases)
-        raise SchemaErrors(f"Soft schema validation warnings at {stage}", e.failure_cases)
+        logger.warning(f"Soft schema validation warnings at {stage}", e.failure_cases)
