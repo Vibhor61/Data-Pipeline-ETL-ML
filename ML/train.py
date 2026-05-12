@@ -76,18 +76,10 @@ def lgbm_train(train_libsvm_path, val_libsvm_path):
 
     log_memory_usage("LGBM_AFTER_TRAIN", "Model trained")
 
-    val_data.construct()
-    X_val = val_data.get_data()
-    y_val = val_data.get_label()
-
-    pred = model.predict(X_val, num_iteration=model.best_iteration)
-    score = rmse(y_val, pred)
+    score = model.best_score["validation"]["rmse"]
 
     del train_data
     del val_data
-    del pred
-    del y_val
-    del X_val
 
     gc.collect()
 
@@ -125,14 +117,11 @@ def xgboost_train(train_libsvm_path, val_libsvm_path):
     
     log_memory_usage("XGBOOST_AFTER_TRAIN", "Model trained")
     
-    y_val = val_dmatrix.get_label()
-    preds = model.predict(val_dmatrix)
-    score = rmse(y_val, preds)
+    score = model.best_score
 
     del train_dmatrix
     del val_dmatrix
-    del preds
-    del y_val
+    
     gc.collect()
     log_memory_usage("XGBOOST_TRAIN_END", f"RMSE: {score:.4f}")
     

@@ -73,15 +73,18 @@ DECIMAL_COLS = [
 
 
 def preprocess(df: pd.DataFrame) -> pd.DataFrame:
-    for col in df.select_dtypes(include=["int64"]).columns:
+    for col in df.select_dtypes(include=["integer"]).columns:
         df[col] = df[col].astype("int32")
 
-    for col in df.select_dtypes(include=["float64"]).columns:
+    for col in df.select_dtypes(include=["floating"]).columns:
         df[col] = df[col].astype("float32")
     
     for col in CATEGORICAL_COLS:
         if col in df.columns:
             df[col] = df[col].astype("category")
+
+    for col in df.select_dtypes(include=["bool"]).columns:
+        df[col] = df[col].astype("int8")
 
     if "run_date" in df.columns:
         df["run_date"] = pd.to_datetime(df["run_date"], errors="coerce")
@@ -100,7 +103,7 @@ def fit_encoder(df: pd.DataFrame) -> OrdinalEncoder:
     return encoder
 
 
-def transform_xgb(df: pd.DataFrame, encoders: dict) -> pd.DataFrame:
+def transform(df: pd.DataFrame, encoders: dict) -> pd.DataFrame:
     df = df.copy(deep=False)
     for col in CATEGORICAL_COLS:
 
@@ -114,13 +117,4 @@ def transform_xgb(df: pd.DataFrame, encoders: dict) -> pd.DataFrame:
             df[col].astype(str).map(lambda x: mapping.get(x, unk)).astype("int32")
         )
 
-    return df
-
-
-def categorical_cols_cast(df: pd.DataFrame) -> pd.DataFrame:
-    """Cast categorical columns to category dtype for LightGBM."""
-    df = df.copy(deep=False)
-    for col in CATEGORICAL_COLS:
-        if col in df.columns:
-            df[col] = df[col].astype("category")
     return df

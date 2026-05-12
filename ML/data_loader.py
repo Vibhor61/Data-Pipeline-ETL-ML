@@ -15,7 +15,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from utils.db import get_connection
-from ML.preprocess import preprocess, transform_xgb, CATEGORICAL_COLS, ALL_COLS
+from ML.preprocess import preprocess, transform, CATEGORICAL_COLS, ALL_COLS
 
 logger = logging.getLogger(__name__)
 BASE_DATE = pd.to_datetime("2011-01-29")
@@ -222,7 +222,7 @@ def load_gold_dataset(conn, cfg: DataLoader, start_date, end_date, train_end, va
         )
         df_batch = df_batch.drop(columns=["run_date"])
 
-        encoded_df = transform_xgb(df_batch, encoders)
+        encoded_df = transform(df_batch, encoders)
         logger.info(f"Batch encoded RAM = {get_memory_usage_mb():.2f}MB")
         
         if FEATURES is None:

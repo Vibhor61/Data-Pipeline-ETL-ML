@@ -1,6 +1,5 @@
 import os
 import json
-import tempfile
 import pandas as pd
 import logging
 import joblib
@@ -10,7 +9,7 @@ import mlflow
 import mlflow.lightgbm
 import mlflow.xgboost
 
-from ML.preprocess import preprocess, transform_xgb, categorical_cols_cast
+from ML.preprocess import preprocess, transform
 
 logger = logging.getLogger(__name__)
 
@@ -46,11 +45,13 @@ def load_model(mlflow_run_id: str):
     run = mlflow.get_run(mlflow_run_id)
     best_model = run.data.params.get("best_model")
 
+    if best_model is None:
+        raise ValueError(f"Missing best_model parameter in MLflow run {mlflow_run_id}")
+
+    model_uri = f"runs:/{mlflow_run_id}/model"
     if best_model == "lgb":
-        model_uri = f"runs:/{mlflow_run_id}/lgb_model"
         return mlflow.lightgbm.load_model(model_uri), best_model
     elif best_model == "xgb":
-        model_uri = f"runs:/{mlflow_run_id}/xgb_model"
         return mlflow.xgboost.load_model(model_uri), best_model
     else:
         raise ValueError(f"Unknown best_model: {best_model}")
@@ -91,11 +92,8 @@ def predict_pipeline(test_path: str, run_id: str, dataset_id: str, train_mlflow_
         raise ValueError(f"Missing features in test data: {missing_features}")
     
     X_test = test_df[features]
-    if model_type == "lgb":
-        feature_df = categorical_cols_cast(X_test)
-
-    elif model_type == "xgb":
-        feature_df = transform_xgb(X_test, encoders)
+    feature_df = transform(X_test, encoders)
+    feature_df = feature_df[features]
 
     preds = model.predict(feature_df)
     
