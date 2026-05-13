@@ -104,6 +104,7 @@ def predict_pipeline(test_path: str, run_id: str, dataset_id: str, train_mlflow_
 
     prediction_df = pd.DataFrame({
         "prediction": preds,
+        "baseline_prediction": test_df["sales_lag_7"],
         "sales": test_df[TARGET_COL],
         "store_id": test_df["store_id"],
         "dept_id": test_df["dept_id"],

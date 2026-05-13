@@ -41,6 +41,10 @@ def rmse(y_true, y_pred):
     return np.sqrt(mean_squared_error(y_true, y_pred))
 
 
+def wmape(y_true, y_pred):
+    return np.sum(np.abs(y_true - y_pred)) / (np.sum(np.abs(y_true)) + 1e-8)
+
+
 def lgbm_train(train_libsvm_path, val_libsvm_path):
     log_memory_usage("LGBM_TRAIN_START")
 
@@ -172,51 +176,69 @@ def train_pipeline(val_df: pd.DataFrame, train_libsvm_path: str, val_libsvm_path
         "num_features": len(features)
     })
 
+    mlflow.set_tags({
+        "evaluation_metric": "wmape",
+        "baseline_model": "sales_lag_7"
+    })
     
     baseline_pred = val_df["sales_lag_7"].values
-    baseline_score = rmse(val_df[TARGET_COL].values, baseline_pred)
-    mlflow.log_metric("baseline_rmse", baseline_score)
+    baseline_rmse = rmse(val_df[TARGET_COL].values, baseline_pred)
+    baseline_wmape = wmape(val_df[TARGET_COL].values, baseline_pred)
+    mlflow.log_metrics({
+        "baseline_rmse": baseline_rmse,
+        "baseline_wmape": baseline_wmape
+    })
     del baseline_pred
     gc.collect()
-    log_memory_usage("PIPELINE_BASELINE_COMPUTED", f"Baseline RMSE: {baseline_score:.4f}")
+    log_memory_usage("PIPELINE_BASELINE_COMPUTED", f"Baseline RMSE: {baseline_rmse:.4f} and WMAPE: {baseline_wmape:.4f}")
 
     # LightGBM with categorical feature support
-    lgb_model, lgb_params, lgb_score = lgbm_train(train_libsvm_path, val_libsvm_path)
-    
-    mlflow.log_metric("lgb_val_rmse", lgb_score)
+    lgb_model, lgb_params, lgb_rmse = lgbm_train(train_libsvm_path, val_libsvm_path)
+    lgb_wmape = wmape(val_df[TARGET_COL].values, lgb_model.predict(val_df[features]))
+
+    mlflow.log_metrics({
+            "lgb_val_rmse": lgb_rmse,
+            "lgb_val_wmape": lgb_wmape}
+    )
     mlflow.log_params({f"lgb_{k}": v for k, v in lgb_params.items()})
-    log_memory_usage("PIPELINE_LGBM_COMPLETED", f"LGB RMSE: {lgb_score:.4f}")
+    log_memory_usage("PIPELINE_LGBM_COMPLETED", f"LGB RMSE: {lgb_rmse:.4f} and WMAPE: {lgb_wmape:.4f}")
    
     # XGBoost with ordinal encoding for categorical features
-    xgb_model, xgb_params, xgb_score = xgboost_train(
+    xgb_model, xgb_params, xgb_rmse = xgboost_train(
         train_libsvm_path,
         val_libsvm_path
     )
-
-    mlflow.log_metric("xgb_val_rmse", xgb_score)
+    xgb_wmape = wmape(val_df[TARGET_COL].values, xgb_model.predict(xgb.DMatrix(val_df[features])))
+    mlflow.log_metrics({
+        "xgb_val_rmse": xgb_rmse,
+        "xgb_val_wmape": xgb_wmape
+    })
     mlflow.log_params({f"xgb_{k}": v for k, v in xgb_params.items()})
-    log_memory_usage("PIPELINE_XGBOOST_COMPLETED", f"XGB RMSE: {xgb_score:.4f}")
+    log_memory_usage("PIPELINE_XGBOOST_COMPLETED", f"XGB RMSE: {xgb_rmse:.4f} and WMAPE: {xgb_wmape:.4f}")
 
-    if lgb_score < xgb_score:
+    if lgb_wmape < xgb_wmape:
         best_model = lgb_model
         best_name = "lgb"
-        best_rmse = lgb_score
+        best_wmape = lgb_wmape
         mlflow.lightgbm.log_model(best_model, "model")
     else:
         best_model = xgb_model
         best_name = "xgb"
-        best_rmse = xgb_score
+        best_wmape = xgb_wmape
         mlflow.xgboost.log_model(best_model, "model")
 
-    mlflow.log_metric("training_feature_count", len(best_model.feature_name()))
+    mlflow.log_metric("training_feature_count", len(features))
     mlflow.log_param("best_model", best_name)
-    mlflow.log_metric("best_val_rmse", best_rmse)
+    mlflow.log_metric("best_val_wmape", best_wmape)
+
+    improvement_over_baseline = (baseline_wmape - best_wmape) / baseline_wmape * 100
+    mlflow.log_metric("wmape_improvement_over_baseline_pct", improvement_over_baseline)
 
     del xgb_model
     del lgb_model
     del val_df
     gc.collect()
-    log_memory_usage("PIPELINE_MODELS_CLEANED", f"Best model: {best_name}, RMSE: {best_rmse:.4f}")
+    log_memory_usage("PIPELINE_MODELS_CLEANED", f"Best model: {best_name}, WMAPE: {best_wmape:.4f}")
 
     mlflow.log_artifact(
         os.path.join(dataset_dir, "metadata.json"),

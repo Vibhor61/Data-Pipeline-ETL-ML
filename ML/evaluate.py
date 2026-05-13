@@ -10,15 +10,14 @@ import logging
 logger = logging.getLogger(__name__)
 
 TARGET_COL = "sales"
+PREDICTION_COL = "prediction"
+BASELINE_PREDICTION_COL = "baseline_prediction"
+
 STORE_COL = "store_id"
 DEPT_COL = "dept_id"
 
 def rmse(y_true, y_pred):
     return np.sqrt(mean_squared_error(y_true, y_pred))
-
-
-def mape(y_true, y_pred):
-    return np.mean(np.abs((y_true - y_pred) / (y_true + 1e-8))) * 100
 
 
 def wmape(y_true, y_pred):
@@ -29,10 +28,10 @@ def compute_slice_metrics(df: pd.DataFrame, group_col: str) -> pd.DataFrame:
     metrics_df = (
         df.groupby(group_col).apply(
             lambda x: pd.Series({
-                "rmse": rmse(x[TARGET_COL], x["prediction"]),
-                "mae": mean_absolute_error(x[TARGET_COL], x["prediction"]),
-                "wmape": wmape(x[TARGET_COL], x["prediction"]),
-                "bias": (x[TARGET_COL] - x["prediction"]).mean(),
+                "rmse": rmse(x[TARGET_COL], x[PREDICTION_COL]),
+                "mae": mean_absolute_error(x[TARGET_COL], x[PREDICTION_COL]),
+                "wmape": wmape(x[TARGET_COL], x[PREDICTION_COL]),
+                "bias": (x[TARGET_COL] - x[PREDICTION_COL]).mean(),
                 "rows": len(x)
             })
         )
@@ -40,6 +39,16 @@ def compute_slice_metrics(df: pd.DataFrame, group_col: str) -> pd.DataFrame:
     )
     return metrics_df
 
+
+def log_slice_metrics(metrics_df: pd.DataFrame, group_col: str):
+
+    mlflow.log_metrics({
+        f"{group_col}_avg_wmape": metrics_df["wmape"].mean(),
+        f"{group_col}_best_wmape": metrics_df["wmape"].max(),
+        f"{group_col}_worst_wmape": metrics_df["wmape"].min(),
+        f"{group_col}_median_wmape": metrics_df["wmape"].median(),
+        f"{group_col}_p90_wmape": metrics_df["wmape"].quantile(0.9),
+    })
 
 def evaluate_pipeline(pred_path: str, run_id: str, dataset_id: str, train_mlflow_run_id: str, pred_mlflow_run_id: str, mlflow_run_id: str, dataset_dir: str = None):
     logger.info(
@@ -86,19 +95,25 @@ def evaluate_pipeline(pred_path: str, run_id: str, dataset_id: str, train_mlflow
     pred_df = pd.read_parquet(pred_path)
     logger.info("Loaded prediction file %s with %s rows", pred_path, len(pred_df))
 
-    required_cols = {"sales", "prediction", STORE_COL, DEPT_COL}
+    required_cols = {TARGET_COL, PREDICTION_COL, BASELINE_PREDICTION_COL, STORE_COL, DEPT_COL}
     if not required_cols.issubset(pred_df.columns):
         raise ValueError(
             f"Predictions file must contain columns {required_cols}"
         )
     
-    y_true = pred_df["sales"]
-    y_pred = pred_df["prediction"]
+    y_true = pred_df[TARGET_COL]
+    y_pred = pred_df[PREDICTION_COL]
+    baseline_pred = pred_df[BASELINE_PREDICTION_COL]
+
+    baseline_metrics = {
+        "baseline_rmse": rmse(y_true, baseline_pred),
+        "baseline_mae": mean_absolute_error(y_true, baseline_pred),
+        "baseline_wmape": wmape(y_true, baseline_pred),
+    }
 
     metrics = {
         "test_rmse": rmse(y_true, y_pred),
         "test_mae": mean_absolute_error(y_true, y_pred),
-        "test_mape": mape(y_true, y_pred),
         "test_wmape": wmape(y_true, y_pred),
         "test_r2": r2_score(y_true, y_pred)
     }
@@ -106,23 +121,25 @@ def evaluate_pipeline(pred_path: str, run_id: str, dataset_id: str, train_mlflow
     errors = y_true - y_pred
     metrics["error_mean"] = errors.mean()
     metrics["error_std"] = errors.std()
-
+    
     mlflow.log_metrics(metrics)
-    logger.info("Logged overall metrics: %s", metrics)
+    mlflow.log_metrics(baseline_metrics)
+
+    improvement_over_baseline = (baseline_metrics["baseline_wmape"] - metrics["test_wmape"]) / baseline_metrics["baseline_wmape"] * 100
+    mlflow.log_metric("wmape_improvement_over_baseline_pct", improvement_over_baseline)
+
+    model_abs_error = np.abs(y_true - y_pred).mean()
+    baseline_abs_error = np.abs(y_true - baseline_pred).mean()
+    improvement_over_baseline_abs_error_pct = (baseline_abs_error - model_abs_error) / baseline_abs_error * 100
+    mlflow.log_metric("prediction_abs_error_improvement_over_baseline_pct", improvement_over_baseline_abs_error_pct)
 
     store_metrics = compute_slice_metrics(pred_df, STORE_COL)
     dept_metrics = compute_slice_metrics(pred_df, DEPT_COL)
+    log_slice_metrics(store_metrics, STORE_COL)
+    log_slice_metrics(dept_metrics, DEPT_COL)
 
-    worst_store = store_metrics["wmape"].max()
-    worst_dept = dept_metrics["wmape"].max()
-    best_store = store_metrics["wmape"].min()
-    best_dept = dept_metrics["wmape"].min()
+    logger.info("Logged overall metrics: %s", metrics)
 
-    mlflow.log_metric("worst_store_wmape", worst_store)
-    mlflow.log_metric("worst_dept_wmape", worst_dept)
-    mlflow.log_metric("best_store_wmape", best_store)
-    mlflow.log_metric("best_dept_wmape", best_dept)
-    
     with tempfile.TemporaryDirectory() as tmpdir:
 
         store_path = os.path.join(tmpdir, "store_metrics.csv")
