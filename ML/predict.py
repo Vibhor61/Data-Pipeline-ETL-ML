@@ -9,7 +9,7 @@ import mlflow
 import mlflow.lightgbm
 import mlflow.xgboost
 
-from ML.preprocess import preprocess, transform
+from sklearn.datasets import load_svmlight_file
 
 logger = logging.getLogger(__name__)
 
@@ -82,36 +82,41 @@ def predict_pipeline(test_path: str, run_id: str, dataset_id: str, train_mlflow_
             f"but prediction requested on {dataset_id}"
         )
 
-    encoders, features, _ = load_artifacts_from_dataset(dataset_dir)
-    model, model_type = load_model(train_mlflow_run_id)
-    
-    test_df = pd.read_parquet(test_path)
-    test_df = preprocess(test_df)
-    missing_features = set(features) - set(test_df.columns)
-    if missing_features:
-        raise ValueError(f"Missing features in test data: {missing_features}")
-    
-    X_test = test_df[features]
-    feature_df = transform(X_test, encoders)
-    feature_df = feature_df[features]
+    _, features, _ = load_artifacts_from_dataset(dataset_dir)
+    logger.info("Loaded dataset artifacts from %s", dataset_dir)
 
-    preds = model.predict(feature_df)
-    
+    model, model_type = load_model(train_mlflow_run_id)
+    logger.info("Loaded model type %s from MLflow run %s", model_type, train_mlflow_run_id)
+
+    test_libsvm_path = os.path.join(dataset_dir, "test.libsvm")
+
+    X_test, y_test = load_svmlight_file(
+        test_libsvm_path,
+        n_features=len(features),
+        zero_based=True
+    )
+
+    logger.info("Loaded test libsvm from %s with %s rows", test_libsvm_path, X_test.shape[0])
+    logger.info("X_test shape: %s, model expects: %s", X_test.shape, model.num_feature())
+    preds = model.predict(X_test)
+
+    test_df = pd.read_parquet(os.path.join(dataset_dir, "test.parquet"))
+
     prediction_df = pd.DataFrame({
         "prediction": preds,
-        "actual": test_df[TARGET_COL],
+        "sales": test_df[TARGET_COL],
         "store_id": test_df["store_id"],
         "dept_id": test_df["dept_id"],
     })
 
     pred_path = os.path.join(dataset_dir, "predictions.parquet")
     prediction_df.to_parquet(pred_path, index=False)
+    logger.info("Saved prediction output to %s", pred_path)
 
     mlflow.log_artifact(pred_path, artifact_path="predictions")
     mlflow.log_metric("prediction_rows", len(prediction_df))
 
-    logger.info("Prediction completed rows=%s", len(prediction_df))
-
-    del test_df, feature_df, prediction_df, preds, model
+    logger.info("Prediction completed rows=%s output=%s", len(prediction_df), pred_path)
+    del test_df, prediction_df, preds, model, X_test, y_test
     gc.collect()
     return pred_path

@@ -42,7 +42,12 @@ def compute_slice_metrics(df: pd.DataFrame, group_col: str) -> pd.DataFrame:
 
 
 def evaluate_pipeline(pred_path: str, run_id: str, dataset_id: str, train_mlflow_run_id: str, pred_mlflow_run_id: str, mlflow_run_id: str, dataset_dir: str = None):
-    logger.info("Evaluation pipeline started for run_id=%s dataset_id=%s", run_id, dataset_id)
+    logger.info(
+        "Evaluation pipeline started for run_id=%s dataset_id=%s pred_mlflow_run_id=%s",
+        run_id,
+        dataset_id,
+        pred_mlflow_run_id,
+    )
     
     if dataset_dir is None:
         dataset_dir = os.path.dirname(pred_path)
@@ -79,14 +84,15 @@ def evaluate_pipeline(pred_path: str, run_id: str, dataset_id: str, train_mlflow
         )
     
     pred_df = pd.read_parquet(pred_path)
+    logger.info("Loaded prediction file %s with %s rows", pred_path, len(pred_df))
 
-    required_cols = {"actual", "prediction", STORE_COL, DEPT_COL}
+    required_cols = {"sales", "prediction", STORE_COL, DEPT_COL}
     if not required_cols.issubset(pred_df.columns):
         raise ValueError(
             f"Predictions file must contain columns {required_cols}"
         )
     
-    y_true = pred_df["actual"]
+    y_true = pred_df["sales"]
     y_pred = pred_df["prediction"]
 
     metrics = {
@@ -102,16 +108,21 @@ def evaluate_pipeline(pred_path: str, run_id: str, dataset_id: str, train_mlflow
     metrics["error_std"] = errors.std()
 
     mlflow.log_metrics(metrics)
+    logger.info("Logged overall metrics: %s", metrics)
 
     store_metrics = compute_slice_metrics(pred_df, STORE_COL)
     dept_metrics = compute_slice_metrics(pred_df, DEPT_COL)
 
-    mlflow.log_metric("worst_store_wmape", store_metrics["wmape"].max())
-    mlflow.log_metric("worst_dept_wmape", dept_metrics["wmape"].max())
+    worst_store = store_metrics["wmape"].max()
+    worst_dept = dept_metrics["wmape"].max()
+    best_store = store_metrics["wmape"].min()
+    best_dept = dept_metrics["wmape"].min()
 
-    mlflow.log_metric("best_store_wmape", store_metrics["wmape"].min())
-    mlflow.log_metric("best_dept_wmape", dept_metrics["wmape"].min())
-
+    mlflow.log_metric("worst_store_wmape", worst_store)
+    mlflow.log_metric("worst_dept_wmape", worst_dept)
+    mlflow.log_metric("best_store_wmape", best_store)
+    mlflow.log_metric("best_dept_wmape", best_dept)
+    
     with tempfile.TemporaryDirectory() as tmpdir:
 
         store_path = os.path.join(tmpdir, "store_metrics.csv")

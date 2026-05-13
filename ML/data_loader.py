@@ -9,6 +9,7 @@ import json
 import os
 import joblib
 
+from sklearn.datasets import dump_svmlight_file
 from typing import Dict, List, Tuple, Any
 from dataclasses import dataclass
 import pyarrow as pa
@@ -42,29 +43,6 @@ class DataLoader:
     date_column: str    # typically "run_date"
     feature_version: str 
     output_dir: str
-
-
-class LibSVMWriter:
-    def __init__(self, file_path: str, feature_cols: List[str], target_col: str):
-        self.file_path = file_path
-        self.feature_cols = feature_cols
-        self.target_col = target_col
-        self.file = open(file_path, "w")
-
-    def write_batch(self, df: pd.DataFrame):
-        for row in df.itertuples(index=False):
-            label = getattr(row, self.target_col)
-            features = []
-            for i, col in enumerate(self.feature_cols, start=1):
-                val = getattr(row, col)
-                if pd.notna(val) and val != 0:
-                    features.append(f"{i}:{val}")
-
-            line = f"{label} " + " ".join(features)
-            self.file.write(line + "\n")
-
-    def close(self):
-        self.file.close()
 
 
 def fetch_etl_run(conn, run_id:str) -> pd.Series:
@@ -196,7 +174,7 @@ def load_gold_dataset(conn, cfg: DataLoader, start_date, end_date, train_end, va
     FEATURES = None
     SCHEMA = None
     parquet_writers = {"train": None, "val": None, "test": None}
-    libsvm_writers = {"train": None, "val": None, "test": None}
+    libsvm_files = {"train": None, "val": None, "test": None}
 
     row_counts = {"train": 0, "val": 0, "test": 0}
 
@@ -259,11 +237,11 @@ def load_gold_dataset(conn, cfg: DataLoader, start_date, end_date, train_end, va
             logger.info(f"Partition {partition} encoded size: {len(libsvm_df)}")
             
             if not libsvm_df.empty:
-                if libsvm_writers[partition] is None:
-                    libsvm_writers[partition] = LibSVMWriter(
-                        libsvm_paths[partition], FEATURES, TARGET_COL
-                    )
-                libsvm_writers[partition].write_batch(libsvm_df)
+                if libsvm_files[partition] is None:
+                    libsvm_files[partition] = open(libsvm_paths[partition], 'ab')
+                
+                feature_matrix = libsvm_df[FEATURES].fillna(0)
+                dump_svmlight_file(feature_matrix, libsvm_df[TARGET_COL], libsvm_files[partition], zero_based=True)
         
         batch_num += 1
 
@@ -278,9 +256,9 @@ def load_gold_dataset(conn, cfg: DataLoader, start_date, end_date, train_end, va
         if w:
             w.close()
     
-    for w in libsvm_writers.values():
-        if w:
-            w.close()
+    for f in libsvm_files.values():
+        if f:
+            f.close()
 
     final_memory = get_memory_usage_mb()
     logger.info(
@@ -352,7 +330,8 @@ def build_dataset_cfg(cfg: DataLoader) -> Tuple[Dict[str, str], Dict[str, str], 
 
             # 4. feature hash
             feature_hash = compute_hash({
-                "feature_version": cfg.feature_version
+                "feature_version": cfg.feature_version,
+                "features": features
             })
 
             # 5. dataset hash (CORE CONTRACT)

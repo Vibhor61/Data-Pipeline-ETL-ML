@@ -208,6 +208,7 @@ def train_pipeline(val_df: pd.DataFrame, train_libsvm_path: str, val_libsvm_path
         best_rmse = xgb_score
         mlflow.xgboost.log_model(best_model, "model")
 
+    mlflow.log_metric("training_feature_count", len(best_model.feature_name()))
     mlflow.log_param("best_model", best_name)
     mlflow.log_metric("best_val_rmse", best_rmse)
 
