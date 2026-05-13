@@ -44,8 +44,8 @@ def log_slice_metrics(metrics_df: pd.DataFrame, group_col: str):
 
     mlflow.log_metrics({
         f"{group_col}_avg_wmape": metrics_df["wmape"].mean(),
-        f"{group_col}_best_wmape": metrics_df["wmape"].max(),
-        f"{group_col}_worst_wmape": metrics_df["wmape"].min(),
+        f"{group_col}_best_wmape": metrics_df["wmape"].min(),
+        f"{group_col}_worst_wmape": metrics_df["wmape"].max(),
         f"{group_col}_median_wmape": metrics_df["wmape"].median(),
         f"{group_col}_p90_wmape": metrics_df["wmape"].quantile(0.9),
     })

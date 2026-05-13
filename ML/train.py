@@ -45,7 +45,7 @@ def wmape(y_true, y_pred):
     return np.sum(np.abs(y_true - y_pred)) / (np.sum(np.abs(y_true)) + 1e-8)
 
 
-def lgbm_train(train_libsvm_path, val_libsvm_path):
+def lgbm_train(train_libsvm_path, val_libsvm_path, val_df, features):
     log_memory_usage("LGBM_TRAIN_START")
 
     train_data = lgb.Dataset(train_libsvm_path, params={"format": "libsvm", "free_raw_data": True})
@@ -80,19 +80,22 @@ def lgbm_train(train_libsvm_path, val_libsvm_path):
 
     log_memory_usage("LGBM_AFTER_TRAIN", "Model trained")
 
-    score = model.best_score["validation"]["rmse"]
+    lgb_rmse_score = model.best_score["validation"]["rmse"]
+    
+    lgb_preds = model.predict(val_df[features])
+    lgb_wmape_score = wmape(val_df[TARGET_COL].values, lgb_preds)
 
     del train_data
     del val_data
 
     gc.collect()
 
-    log_memory_usage("LGBM_TRAIN_END", f"RMSE: {score:.4f}")
+    log_memory_usage("LGBM_TRAIN_END", f"RMSE: {lgb_rmse_score:.4f}")
     
-    return model, params, score
+    return model, params, lgb_rmse_score, lgb_wmape_score
 
 
-def xgboost_train(train_libsvm_path, val_libsvm_path):
+def xgboost_train(train_libsvm_path, val_libsvm_path, val_df, features):
     log_memory_usage("XGBOOST_TRAIN_START", f"Train: {train_libsvm_path}")
 
     train_dmatrix = xgb.DMatrix(f"{train_libsvm_path}?format=libsvm#train.cache")
@@ -121,15 +124,20 @@ def xgboost_train(train_libsvm_path, val_libsvm_path):
     
     log_memory_usage("XGBOOST_AFTER_TRAIN", "Model trained")
     
-    score = model.best_score
+    xgb_rmse_score = model.best_score
+    
+    dval = xgb.DMatrix(val_df[features], enable_categorical=True)
+    xgb_preds = model.predict(dval)
+    xgb_wmape_score = wmape(val_df[TARGET_COL].values, xgb_preds)
 
     del train_dmatrix
     del val_dmatrix
+    del dval
     
     gc.collect()
-    log_memory_usage("XGBOOST_TRAIN_END", f"RMSE: {score:.4f}")
+    log_memory_usage("XGBOOST_TRAIN_END", f"RMSE: {xgb_rmse_score:.4f}")
     
-    return model, params, score
+    return model, params, xgb_rmse_score, xgb_wmape_score
  
 
 def load_dataset_artifacts(dataset_dir: str):
@@ -193,8 +201,7 @@ def train_pipeline(val_df: pd.DataFrame, train_libsvm_path: str, val_libsvm_path
     log_memory_usage("PIPELINE_BASELINE_COMPUTED", f"Baseline RMSE: {baseline_rmse:.4f} and WMAPE: {baseline_wmape:.4f}")
 
     # LightGBM with categorical feature support
-    lgb_model, lgb_params, lgb_rmse = lgbm_train(train_libsvm_path, val_libsvm_path)
-    lgb_wmape = wmape(val_df[TARGET_COL].values, lgb_model.predict(val_df[features]))
+    lgb_model, lgb_params, lgb_rmse, lgb_wmape = lgbm_train(train_libsvm_path, val_libsvm_path, val_df, features)
 
     mlflow.log_metrics({
             "lgb_val_rmse": lgb_rmse,
@@ -204,11 +211,13 @@ def train_pipeline(val_df: pd.DataFrame, train_libsvm_path: str, val_libsvm_path
     log_memory_usage("PIPELINE_LGBM_COMPLETED", f"LGB RMSE: {lgb_rmse:.4f} and WMAPE: {lgb_wmape:.4f}")
    
     # XGBoost with ordinal encoding for categorical features
-    xgb_model, xgb_params, xgb_rmse = xgboost_train(
+    xgb_model, xgb_params, xgb_rmse, xgb_wmape = xgboost_train(
         train_libsvm_path,
-        val_libsvm_path
+        val_libsvm_path,
+        val_df,
+        features
     )
-    xgb_wmape = wmape(val_df[TARGET_COL].values, xgb_model.predict(xgb.DMatrix(val_df[features])))
+
     mlflow.log_metrics({
         "xgb_val_rmse": xgb_rmse,
         "xgb_val_wmape": xgb_wmape
@@ -265,7 +274,7 @@ def train_main(run_id: str, dataset_id: str, train_path: str, val_path: str, tra
     
     val_df = pd.read_parquet(val_path)
     
-    log_memory_usage("MAIN_DATA_LOADED, Val shape: {val_df.shape}")
+    log_memory_usage(f"MAIN_DATA_LOADED, Val shape: {val_df.shape}")
 
     try:
         train_pipeline(
