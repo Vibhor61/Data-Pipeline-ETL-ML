@@ -288,6 +288,7 @@ with DAG(
     default_args=default_args,
     description="Retail ETL DAG with run and step metadata tracking",
     start_date=datetime(2011,1,29),
+    schedule_interval=None,
     # schedule_interval="@daily",
     catchup=True,
     max_active_runs=1,

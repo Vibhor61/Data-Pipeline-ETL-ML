@@ -344,6 +344,7 @@ with DAG(
     dag_id=DAG_ID,
     start_date=datetime(2012, 1, 1),
     # schedule_interval="@weekly",
+    schedule_interval=None,
     catchup=False,
     max_active_runs=1,
     default_args=default_args,
