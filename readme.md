@@ -21,7 +21,7 @@ A production-grade **Airflow-based ETL + ML pipeline** for retail demand forecas
 | **ETL Processing** | SQL (PostgreSQL Window Functions, CTEs, Joins) | Bronze → Silver → Gold transformations with Pandera validation |
 | **Schema Validation** | Pandera | Runtime schema and grain validation for ETL outputs |
 | **Data Formats** | Parquet, LibSVM | Columnar storage (Parquet); model-agnostic libsvm for ML training |
-| **ML Training** | XGBoost, LightGBM | Gradient boosting models with early stopping and hyperparameter tuning |
+| **ML Training** | XGBoost, LightGBM | Gradient boosting models with early stopping |
 | **ML Pipeline** | scikit-learn | Encoding, preprocessing, metric computation |
 | **Experiment Tracking** | MLflow | Run management, artifact storage, metrics logging |
 | **Dataset Serialization** | PyArrow | Parquet I/O and Arrow table operations |
@@ -293,8 +293,6 @@ Default Airflow credentials: airflow/airflow
 
 ## Future work and improvements
 
-- Hyperparameter optimization pipeline
-- CI/CD integration for automated testing and deployment
 - Real-time inference pipeline
 - Data drift and model drift monitoring
 - Online feature store integration
