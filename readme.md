@@ -204,12 +204,13 @@ create_run → build_dataset → train → predict → evaluate → finalize
 
 | Task | Responsibility | Input | Output |
 |------|-----------------|-------|--------|
-| `create_run` | Fetch ETL run_id, create ML pipeline run, start MLflow parent run | run_date | run_id, parent_mlflow_run_id |
-| `build_dataset` | Load gold table, build train/val/test splits, write parquet & libsvm | gold_table | dataset_id, split paths |
-| `train` | Train model on train/val splits, log artifacts to MLflow | split paths | train_mlflow_run_id |
-| `predict` | Generate predictions on test set | test_path, train_mlflow_run_id | pred_path, pred_mlflow_run_id |
-| `evaluate` | Compute metrics, log results to MLflow | pred_path | evaluation summary |
-| `finalize` | Mark ML pipeline run as success | evaluation results | pipeline status |
+| `create_run` | Fetch ETL `run_id`, create ML pipeline run, initialize MLflow parent run | `run_date` | `run_id`, `run_date`, `mlflow_run_id` |
+| `build_dataset` | Build train/val/test datasets from gold table and log dataset metadata | `run_id`, `run_date` | `dataset_id`, split paths, dataset directory |
+| `train` | Train model using LIBSVM train/val splits via `run_stage`, log metrics and artifacts to MLflow | `train_libsvm_path`, `val_libsvm_path`, `dataset_dir`, `dataset_id`, `mlflow_run_id` | model artifacts, training metrics |
+| `predict` | Generate predictions on test set using trained model via `run_stage` | `test_path`, `dataset_dir`, `dataset_id`, `mlflow_run_id` | `pred_path` |
+| `evaluate` | Compute evaluation metrics from predictions via `run_stage` | `pred_path`, `dataset_dir`, `dataset_id`, `mlflow_run_id` | evaluation metrics |
+| `finalize` | Mark ML pipeline run as `success` in metadata store | `run_id` | pipeline status |
+
 
 ![ML_dag_Grid-View](images/ml_dag.png)
 
