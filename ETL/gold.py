@@ -7,17 +7,14 @@ Input: Silver data up to run_date
 Output: Fully materialized Gold partition (same run_date)
 
 Core design principles:
-- run_date is the source of truth for all data slicing
-- ingestion is partition-based (DELETE + INSERT per run_date)
-- features are computed using only past data
-- strict schema validation before commit
-
-Invariants:
-- exactly one Gold partition exists per run_date
-- unique grain: (item_id, store_id, d, run_date)
-- no future data is used in feature computation
-- schema is strictly enforced (no extra/missing columns)
+- Ingestion Strategy: Idempotent atomic overwrite via a strict DELETE + INSERT mechanism 
+  scoped to the current execution `run_date`.
+- Temporal Boundaries: Computes analytical features using strictly bounded historical metrics 
+  (<= `run_date`) to guarantee complete freedom from data leakage.
+- Validation Boundary: Enforces technical schema compliance and storage-level invariants 
+  via Pandera before completing the transaction block.
 """
+
 import logging
 import os
 import argparse
@@ -46,12 +43,7 @@ def validate_table_name(table_name: str) -> sql.Identifier:
 
 def build_gold_partition(conn, run_date: str) -> int:
     """
-    Builds and validates Gold partition for a given run_date.
-    Args:
-        conn: active PostgreSQL connection
-        run_date (str): execution date in YYYY-MM-DD format
-    Returns:
-        int: number of rows inserted into Gold partition
+    Builds and validates Gold partition for a given run_date by executing database-level transformations.
 
     Process:
         - Deletes existing partition for run_date (idempotent overwrite)
@@ -62,10 +54,8 @@ def build_gold_partition(conn, run_date: str) -> int:
         - Derives additional features (is_weekend, quarter, cold_start)
         - Inserts fully materialized feature set into Gold table
         - Validates inserted data using GoldStorageSchema(Pandera based)
-
-    Raises:
-        ValueError: if partition is empty or validation fails
     """
+
     silver_ident = validate_table_name(SILVER_TABLE)
     gold_ident = validate_table_name(GOLD_TABLE)
  
@@ -266,16 +256,8 @@ def build_gold_partition(conn, run_date: str) -> int:
 def run_gold(run_date: str) -> int:
     """
     Executes Gold ETL pipeline for a given run_date.
-    Args:
-        run_date (str): execution date in YYYY-MM-DD format
-    Returns:
-        int: number of rows inserted into Gold table
-
-    Process:
-        - Establishes database connection
-        - Builds Gold partition
-        - Commits transaction on success
-        - Rolls back on failure
+    Provides atomic reliability by rolling back pending data modifications to 
+    prevent unvalidated or broken historical features from committing to storage.
     """
     conn = get_connection()
     try:

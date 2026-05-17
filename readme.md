@@ -19,12 +19,12 @@ A production-grade **Airflow-based ETL + ML pipeline** for retail demand forecas
 | **Orchestration** | Apache Airflow | DAG scheduling and task orchestration |
 | **Metadata & State** | PostgreSQL | All-data-in-database approach: ETL runs, ML stages, dataset metadata, feature stores |
 | **ETL Processing** | SQL (PostgreSQL Window Functions, CTEs, Joins) | Bronze → Silver → Gold transformations with Pandera validation |
-| **Schema Validation** | Pandera | Runtime schema and grain validation for ETL outputs |
-| **Data Formats** | Parquet, LibSVM | Columnar storage (Parquet); model-agnostic libsvm for ML training |
-| **ML Training** | XGBoost, LightGBM | Gradient boosting models with early stopping and hyperparameter tuning |
+| **Schema Validation** | Pandera | Runtime schema and grain validation for ETL outputs and ML usability |
+| **Data Formats** | Parquet, LibSVM | Columnar storage (Parquet) for auditing and model-agnostic libsvm for ML training |
+| **ML Training** | XGBoost, LightGBM | Gradient boosting models with early stopping |
 | **ML Pipeline** | scikit-learn | Encoding, preprocessing, metric computation |
 | **Experiment Tracking** | MLflow | Run management, artifact storage, metrics logging |
-| **Dataset Serialization** | PyArrow | Parquet I/O and Arrow table operations |
+| **Dataset Serialization** | PyArrow | Parquet I/O operations |
 | **Feature Engineering** | SQL + pandas (local) | Lag/rolling features in SQL; validation in pandas |
 | **Memory Management** | psutil, joblib, gc | Memory profiling, encoder persistence, garbage collection |
 | **Containerization** | Docker + Docker Compose | Reproducible environment with Airflow, PostgreSQL, MLflow |
@@ -55,36 +55,52 @@ The dataset contains historical daily sales data of Walmart products across mult
 
 ```
 Data-Pipeline-ETL-ML/
-├── dags/
-│   ├── etl_dag.py              # Bronze → Silver → Gold ETL pipeline
-│   └── ml_dag.py               # Dataset → Train → Predict → Evaluate ML pipeline
-├── ETL/
-│   ├── bronze.py               # Raw data ingestion (CSV → PostgreSQL)
-│   ├── silver.py               # Data cleaning & transformation
-│   └── gold.py                 # Business-ready aggregation (features, aggregations)
-├── ML/
-│   ├── data_loader.py          # Dataset building (train/val/test splits)
-│   ├── train.py                # Model training (XGBoost/LightGBM)
-│   ├── predict.py              # Batch prediction on test set
-│   └── evaluate.py             # Evaluation metrics (RMSE, MAE, WMAPE)
-├── utils/
-│   ├── db.py                   # PostgreSQL connection management
-│   ├── etl_helpers.py          # ETL metadata lifecycle
-│   └── ml_helpers.py           # ML metadata lifecycle
-├── schema/
-│   ├── init.sql                # Database initialization
-│   ├── bronze.sql              # Bronze layer schema (raw data)
-│   ├── silver.sql              # Silver layer schema (cleaned data)
-│   ├── gold.sql                # Gold layer schema (features)
-│   ├── etl_metadata.sql        # ETL run and step tracking tables
-│   └── ml_metadata.sql         # ML pipeline and stage tracking tables
-├── requirements/
-│   ├── airflow.txt             # Airflow + ML dependencies 
-│   └── mlflow.txt              # MLflow server dependencies
-├── docker/                     # Dockerfile configurations
-├── docker-compose.yml          # Full stack orchestration (postgres, airflow, mlflow)
-├── .env                        # Environment variables 
-└── readme.md                   # (This file)
+│
+├── dags/                              # Airflow DAGs for orchestration
+│   ├── etl_dag.py                     # Bronze → Silver → Gold ETL pipeline
+│   └── ml_dag.py                      # Dataset → Train → Predict → Evaluate ML pipeline
+│
+├── ETL/                               # ETL (Extract-Transform-Load) pipeline
+│   ├── bronze.py                      # Raw data ingestion (CSV → PostgreSQL)
+│   ├── silver.py                      # Data cleaning & transformation
+│   ├── gold.py                        # Business-ready aggregation (features, aggregations)
+│   ├── silver_validation.py           # Silver layer schema validation (Pandera)
+│   └── gold_validation.py             # Gold layer schema validation (Pandera)
+│
+├── ML/                                # Machine Learning pipeline
+│   ├── data_loader.py                 # Dataset building (train/val/test splits)
+│   ├── train.py                       # Model training (XGBoost/LightGBM with early stopping)
+│   ├── predict.py                     # Batch prediction on test set
+│   ├── evaluate.py                    # Evaluation metrics (RMSE, MAE, WMAPE, R²)
+│   ├── preprocess.py                  # Feature engineering & categorical encoding
+│   └── validate.py                    # Dataset integrity validation (grain checks, NaN)
+│
+├── utils/                             # Utility modules
+│   ├── db.py                          # PostgreSQL connection management
+│   ├── etl_helpers.py                 # ETL metadata lifecycle (create_or_get_run, start_stage, finish_stage)
+│   └── ml_helpers.py                  # ML metadata lifecycle tracking
+│
+├── schema/                            # Database schema & initialization
+│   ├── init.sql                       # Database and tables initialization
+│   ├── bronze.sql                     # Bronze layer schema (raw data table)
+│   ├── silver.sql                     # Silver layer schema (cleaned data table)
+│   ├── gold.sql                       # Gold layer schema (features table)
+│   ├── etl_metadata.sql               # ETL run and step tracking tables
+│   └── ml_metadata.sql                # ML pipeline and stage tracking tables
+│
+├── requirements/                      
+│   ├── airflow.txt                    # Airflow + core ML dependencies 
+│   └── mlflow.txt                     # MLflow server dependencies
+│
+├── docker/                            # Docker configuration
+│
+├── docker-compose.yml                 # Full stack orchestration
+│                                     
+├── .env                               # Environment variables (template)
+|
+├── .gitignore                         # Git ignore patterns
+│
+└── readme.md                          # Project documentation & quickstart guide
 ```
 
 ---
@@ -117,7 +133,6 @@ Data-Pipeline-ETL-ML/
 - PostgreSQL-backed metadata architecture for ETL and ML lifecycle tracking
 - Full lineage tracking across runs, datasets, models, predictions, and evaluations
 - Nested MLflow runs for experiment management and artifact tracking
-- Airflow XCom-based context propagation between pipeline stages
 - Dataset lineage validation across train → predict → evaluate stages
 
 ### Reliability & Infrastructure
@@ -174,6 +189,8 @@ init_run → bronze → silver → gold → finalize_pipeline
 | `gold` | Aggregate and prepare business-ready dataset | silver_table | gold_table |
 | `finalize_pipeline` | Evaluate all step states, mark run success/failed | step results | pipeline status |
 
+![ETL_Dag_Grid-View](images/etl_dag.png)
+
 ---
 
 ## ML Pipeline (ml_dag.py)
@@ -193,6 +210,8 @@ create_run → build_dataset → train → predict → evaluate → finalize
 | `predict` | Generate predictions on test set | test_path, train_mlflow_run_id | pred_path, pred_mlflow_run_id |
 | `evaluate` | Compute metrics, log results to MLflow | pred_path | evaluation summary |
 | `finalize` | Mark ML pipeline run as success | evaluation results | pipeline status |
+
+![ML_dag_Grid-View](images/ml_dag.png)
 
 ---
 
@@ -289,6 +308,7 @@ airflow dags trigger retail_ml_dag \
 
 Default Airflow credentials: airflow/airflow
 
+![MLflow_UI](images/mlflow.png)
 ---
 
 ## Future work and improvements

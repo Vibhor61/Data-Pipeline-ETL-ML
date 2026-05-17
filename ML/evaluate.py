@@ -1,3 +1,17 @@
+"""
+Evaluation Module - ML Pipeline
+
+Evaluates prediction outputs using global and slice-level
+metrics and logs evaluation artifacts to MLflow.
+
+Evaluation includes:
+- Overall regression metrics
+- Baseline comparison
+- Store-level analysis
+- Department-level analysis
+- Error distribution tracking
+"""
+
 import numpy as np
 import pandas as pd
 import mlflow
@@ -25,6 +39,10 @@ def wmape(y_true, y_pred):
 
 
 def compute_slice_metrics(df: pd.DataFrame, group_col: str) -> pd.DataFrame:
+    """
+    Compute evaluation metrics across grouped dataset slices.
+    Used for store-level and department-level performance analysis.
+    """
     metrics_df = (
         df.groupby(group_col).apply(
             lambda x: pd.Series({
@@ -41,7 +59,7 @@ def compute_slice_metrics(df: pd.DataFrame, group_col: str) -> pd.DataFrame:
 
 
 def log_slice_metrics(metrics_df: pd.DataFrame, group_col: str):
-
+    "Logging of slice metrics to MLflow"
     mlflow.log_metrics({
         f"{group_col}_avg_wmape": metrics_df["wmape"].mean(),
         f"{group_col}_best_wmape": metrics_df["wmape"].min(),
@@ -50,48 +68,28 @@ def log_slice_metrics(metrics_df: pd.DataFrame, group_col: str):
         f"{group_col}_p90_wmape": metrics_df["wmape"].quantile(0.9),
     })
 
-def evaluate_pipeline(pred_path: str, run_id: str, dataset_id: str, train_mlflow_run_id: str, pred_mlflow_run_id: str, mlflow_run_id: str, dataset_dir: str = None):
+def evaluate_pipeline(pred_path: str, run_id: str, dataset_id: str, mlflow_run_id: str, dataset_dir: str = None):
+    """
+    Execute end-to-end evaluation workflow.
+
+    Pipeline stages:
+    1. Load prediction artifacts
+    2. Validate prediction schema
+    3. Compute overall evaluation metrics
+    4. Compare against lag-7 baseline
+    5. Compute slice-level metrics
+    6. Log evaluation artifacts to MLflow
+    """
     logger.info(
-        "Evaluation pipeline started for run_id=%s dataset_id=%s pred_mlflow_run_id=%s",
+        "Evaluation pipeline started for run_id=%s dataset_id=%s mlflow_run_id=%s",
         run_id,
         dataset_id,
-        pred_mlflow_run_id,
+        mlflow_run_id,
     )
     
     if dataset_dir is None:
         dataset_dir = os.path.dirname(pred_path)
-
-    active_run = mlflow.active_run()
-    if active_run is None:
-        raise RuntimeError("No active MLflow run")
-    
-    if active_run.info.run_id != mlflow_run_id:
-        raise RuntimeError(
-            f"Active run {active_run.info.run_id} != expected {mlflow_run_id}"
-        )
-        
-    mlflow.set_tag("source_train_run_id", train_mlflow_run_id)
-    mlflow.set_tag("source_pred_run_id", pred_mlflow_run_id)
-    
-    train_run = mlflow.get_run(train_mlflow_run_id)
-    trained_dataset_id = train_run.data.params.get("dataset_id")
-    if trained_dataset_id != dataset_id:
-        raise ValueError(
-            f"Dataset mismatch: model trained on {trained_dataset_id}, "
-            f"evaluate requested on {dataset_id}"
-        )
-
-    pred_run = mlflow.get_run(pred_mlflow_run_id)
-
-    pred_source_train_run = pred_run.data.tags.get(
-        "source_train_run_id"
-    )
-
-    if pred_source_train_run != train_mlflow_run_id:
-        raise ValueError(
-            "Prediction run was generated from a different training run"
-        )
-    
+           
     pred_df = pd.read_parquet(pred_path)
     logger.info("Loaded prediction file %s with %s rows", pred_path, len(pred_df))
 

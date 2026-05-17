@@ -1,3 +1,17 @@
+"""
+Preprocessing Module - ML Pipeline
+ 
+Handles feature engineering and categorical encoding.
+ 
+Input: Raw gold layer data (from ETL)
+Output: Engineered features + encoded categoricals
+ 
+Core design principles:
+- Deterministic transformations for reproducibility
+- Categorical encoder fitting on training data only
+- Unknown category handling via '__UNK__' token
+"""
+
 import pandas as pd   
 from sklearn.preprocessing import OrdinalEncoder
 
@@ -78,10 +92,6 @@ def preprocess(df: pd.DataFrame) -> pd.DataFrame:
 
     for col in df.select_dtypes(include=["floating"]).columns:
         df[col] = df[col].astype("float32")
-    
-    for col in CATEGORICAL_COLS:
-        if col in df.columns:
-            df[col] = df[col].astype("category")
 
     for col in df.select_dtypes(include=["bool"]).columns:
         df[col] = df[col].astype("int8")

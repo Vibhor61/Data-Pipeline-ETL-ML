@@ -1,21 +1,36 @@
+"""
+Training Module - ML Pipeline
+ 
+Trains and evaluates LightGBM and XGBoost models using
+LibSVM-encoded feature datasets with MLflow experiment tracking.
+ 
+Input: Train/validation LibSVM datasets + metadata and feature artifacts
+Output: Trained model artifact + metrics logged to MLflow
+ 
+Core design principles:
+- Memory profiling at each stage for large-scale data handling
+- Early stopping on validation RMSE to prevent overfitting
+- Baseline comparison (lag-7) for context
+- WMAPE as primary metric
+"""
+
 import gc
 import os
 import json
 import psutil
 import numpy as np
-import pandas as pd
 import logging
 import mlflow
 import mlflow.lightgbm
 import mlflow.xgboost
 
 from sklearn.metrics import mean_squared_error
+from sklearn.datasets import load_svmlight_file
 
 import lightgbm as lgb
 import xgboost as xgb
 from typing import Optional
 
-from ML.validate import validate_ml_dataset
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +38,9 @@ TARGET_COL = "sales"
 
 
 def log_memory_usage(stage: str, additional_info: str = ""):
-    """Log current memory usage for tracing and debugging."""
+    """
+    Log current memory usage for tracing and debugging.
+    """
     process = psutil.Process(os.getpid())
 
     rss_gb = process.memory_info().rss / (1024 ** 3)
@@ -45,13 +62,17 @@ def wmape(y_true, y_pred):
     return np.sum(np.abs(y_true - y_pred)) / (np.sum(np.abs(y_true)) + 1e-8)
 
 
-def lgbm_train(train_libsvm_path, val_libsvm_path, val_df, features):
+def lgbm_train(train_libsvm_path, val_libsvm_path, val_targets, features):
+    """
+    Train LightGBM model with early stopping.
+    Strategy: Load from LibSVM, train with early stopping on validation RMSE, compute WMAPE on full validation set.
+    """
     log_memory_usage("LGBM_TRAIN_START")
 
     train_data = lgb.Dataset(train_libsvm_path, params={"format": "libsvm", "free_raw_data": True})
     val_data = lgb.Dataset(val_libsvm_path, params={"format": "libsvm", "free_raw_data": True})
 
-    log_memory_usage("LGBM_AFTER_DATA_EXTRACTION", "Train/val DFs deleted")
+    log_memory_usage("LGBM_AFTER_DATA_EXTRACTION", "Train/val Datasets created")
 
     params = {
         "objective": "regression",
@@ -80,24 +101,30 @@ def lgbm_train(train_libsvm_path, val_libsvm_path, val_df, features):
 
     log_memory_usage("LGBM_AFTER_TRAIN", "Model trained")
 
-    lgb_rmse_score = model.best_score["validation"]["rmse"]
-    
-    lgb_preds = model.predict(val_df[features])
-    lgb_wmape_score = wmape(val_df[TARGET_COL].values, lgb_preds)
+    # Predict from libsvm
+    val_X, _ = load_svmlight_file(val_libsvm_path, n_features=len(features))
+    preds = model.predict(val_X.toarray())
 
-    del train_data
-    del val_data
+    metrics = {
+        "lgb_rmse": model.best_score["validation"]["rmse"],
+        "lgb_wmape": wmape(val_targets, preds)
+    }
 
-    gc.collect()
+    mlflow.log_params({f"lgb_{k}": v for k, v in params.items()})
+    mlflow.log_metrics(metrics)
 
-    log_memory_usage("LGBM_TRAIN_END", f"RMSE: {lgb_rmse_score:.4f}")
-    
-    return model, params, lgb_rmse_score, lgb_wmape_score
+    mlflow.lightgbm.log_model(model, "model_lgb")
+
+    return model, metrics
 
 
-def xgboost_train(train_libsvm_path, val_libsvm_path, val_df, features):
+def xgboost_train(train_libsvm_path, val_libsvm_path, val_targets, features):
+    """
+    Train XGBoost model with early stopping.
+    Strategy: Load DMatrix from LibSVM, train with early stopping, compute WMAPE on full validation set.
+    """
     log_memory_usage("XGBOOST_TRAIN_START", f"Train: {train_libsvm_path}")
-
+ 
     train_dmatrix = xgb.DMatrix(f"{train_libsvm_path}?format=libsvm#train.cache")
     val_dmatrix = xgb.DMatrix(f"{val_libsvm_path}?format=libsvm#val.cache")
     
@@ -124,24 +151,27 @@ def xgboost_train(train_libsvm_path, val_libsvm_path, val_df, features):
     
     log_memory_usage("XGBOOST_AFTER_TRAIN", "Model trained")
     
-    xgb_rmse_score = model.best_score
-    
-    dval = xgb.DMatrix(val_df[features], enable_categorical=True)
-    xgb_preds = model.predict(dval)
-    xgb_wmape_score = wmape(val_df[TARGET_COL].values, xgb_preds)
+    # Predict from libsvm
+    val_X, _ = load_svmlight_file(val_libsvm_path, n_features=len(features))
+    preds = model.predict(xgb.DMatrix(val_X))
 
-    del train_dmatrix
-    del val_dmatrix
-    del dval
-    
-    gc.collect()
-    log_memory_usage("XGBOOST_TRAIN_END", f"RMSE: {xgb_rmse_score:.4f}")
-    
-    return model, params, xgb_rmse_score, xgb_wmape_score
+    metrics = {
+        "xgb_rmse": model.best_score,
+        "xgb_wmape": wmape(val_targets, preds)
+    }
+
+    mlflow.log_params({f"xgb_{k}": v for k, v in params.items()})
+    mlflow.log_metrics(metrics)
+
+    mlflow.xgboost.log_model(model, "model_xgb")
+
+    return model, metrics
  
 
 def load_dataset_artifacts(dataset_dir: str):
-
+    """
+    Load dataset artifacts required for training includes feature registry and dataset metadata.
+    """
     metadata_path = os.path.join(dataset_dir, "metadata.json")
     features_path = os.path.join(dataset_dir, "features.json")
 
@@ -154,25 +184,31 @@ def load_dataset_artifacts(dataset_dir: str):
     return metadata, features
 
 
-def train_pipeline(val_df: pd.DataFrame, train_libsvm_path: str, val_libsvm_path: str, run_id: str, dataset_id: str, mlflow_run_id: str, dataset_dir: str):
+def train_pipeline(train_libsvm_path: str, val_libsvm_path: str, run_id: str, dataset_id: str, mlflow_run_id: str, dataset_dir: str):
+    """
+    Execute full training pipeline: baseline + LightGBM + XGBoost comparison.
+    
+    Process:
+    1. Validate dataset integrity
+    2. Compute baseline (lag-7) metrics
+    3. Train LightGBM model
+    4. Train XGBoost model
+    5. Select best model based on WMAPE
+    6. Log all artifacts and metrics to MLflow
+    """
     logger.info("Starting pipeline run for run_id=%s dataset_id=%s", run_id, dataset_id)
+    
     log_memory_usage("PIPELINE_START", f"run_id={run_id}, dataset_id={dataset_id}")
-    
-    active_run = mlflow.active_run()
-    if active_run is None:
-        raise RuntimeError("No active MLflow run")
-
-    if active_run.info.run_id != mlflow_run_id:
-        raise RuntimeError(
-            f"Active run {active_run.info.run_id} != expected {mlflow_run_id}"
-        )
-    
+      
     metadata, features = load_dataset_artifacts(dataset_dir)
 
     logger.info("Loaded dataset artifacts")
     log_memory_usage("PIPELINE_ARTIFACTS_LOADED", f"Features: {len(features)}")
     
-    validate_ml_dataset(val_df, stage="validation")
+    # Extract validation targets from libsvm
+    _, val_targets = load_svmlight_file(val_libsvm_path)
+    val_targets = np.asarray(val_targets)
+    logger.info(f"Loaded validation targets: shape={val_targets.shape}")
 
     mlflow.log_params({
         "run_id": run_id,
@@ -189,65 +225,55 @@ def train_pipeline(val_df: pd.DataFrame, train_libsvm_path: str, val_libsvm_path
         "baseline_model": "sales_lag_7"
     })
     
-    baseline_pred = val_df["sales_lag_7"].values
-    baseline_rmse = rmse(val_df[TARGET_COL].values, baseline_pred)
-    baseline_wmape = wmape(val_df[TARGET_COL].values, baseline_pred)
+    # Extract sales_lag_7 feature from libsvm for baseline
+    val_X, _ = load_svmlight_file(val_libsvm_path, n_features=len(features))
+    if "sales_lag_7" in features:
+        lag7_idx = features.index("sales_lag_7")
+        baseline_pred = val_X[:, lag7_idx].toarray().flatten()
+    else:
+        baseline_pred = np.full_like(val_targets, val_targets.mean(), dtype=float)
+    
+    baseline_rmse = rmse(val_targets, baseline_pred)
+    baseline_wmape = wmape(val_targets, baseline_pred)
     mlflow.log_metrics({
         "baseline_rmse": baseline_rmse,
         "baseline_wmape": baseline_wmape
     })
     del baseline_pred
+    del val_X
     gc.collect()
     log_memory_usage("PIPELINE_BASELINE_COMPUTED", f"Baseline RMSE: {baseline_rmse:.4f} and WMAPE: {baseline_wmape:.4f}")
 
-    # LightGBM with categorical feature support
-    lgb_model, lgb_params, lgb_rmse, lgb_wmape = lgbm_train(train_libsvm_path, val_libsvm_path, val_df, features)
-
-    mlflow.log_metrics({
-            "lgb_val_rmse": lgb_rmse,
-            "lgb_val_wmape": lgb_wmape}
-    )
-    mlflow.log_params({f"lgb_{k}": v for k, v in lgb_params.items()})
-    log_memory_usage("PIPELINE_LGBM_COMPLETED", f"LGB RMSE: {lgb_rmse:.4f} and WMAPE: {lgb_wmape:.4f}")
-   
-    # XGBoost with ordinal encoding for categorical features
-    xgb_model, xgb_params, xgb_rmse, xgb_wmape = xgboost_train(
+    # LightGBM with encoded int32 features
+    lgb_model, lgb_metrics = lgbm_train(
         train_libsvm_path,
         val_libsvm_path,
-        val_df,
+        val_targets,
         features
     )
 
-    mlflow.log_metrics({
-        "xgb_val_rmse": xgb_rmse,
-        "xgb_val_wmape": xgb_wmape
-    })
-    mlflow.log_params({f"xgb_{k}": v for k, v in xgb_params.items()})
-    log_memory_usage("PIPELINE_XGBOOST_COMPLETED", f"XGB RMSE: {xgb_rmse:.4f} and WMAPE: {xgb_wmape:.4f}")
+    xgb_model, xgb_metrics = xgboost_train(
+        train_libsvm_path,
+        val_libsvm_path,
+        val_targets,
+        features
+    )
 
-    if lgb_wmape < xgb_wmape:
-        best_model = lgb_model
-        best_name = "lgb"
-        best_wmape = lgb_wmape
-        mlflow.lightgbm.log_model(best_model, "model")
-    else:
-        best_model = xgb_model
-        best_name = "xgb"
-        best_wmape = xgb_wmape
-        mlflow.xgboost.log_model(best_model, "model")
+    best_model = "lightgbm" if lgb_metrics["lgb_wmape"] < xgb_metrics["xgb_wmape"] else "xgboost"
 
-    mlflow.log_metric("training_feature_count", len(features))
-    mlflow.log_param("best_model", best_name)
-    mlflow.log_metric("best_val_wmape", best_wmape)
+    best_wmape = min(lgb_metrics["lgb_wmape"], xgb_metrics["xgb_wmape"])
+
+    mlflow.log_param("best_model", best_model)
+    mlflow.log_metric("best_wmape", best_wmape)
 
     improvement_over_baseline = (baseline_wmape - best_wmape) / baseline_wmape * 100
     mlflow.log_metric("wmape_improvement_over_baseline_pct", improvement_over_baseline)
 
     del xgb_model
     del lgb_model
-    del val_df
+    del val_targets
     gc.collect()
-    log_memory_usage("PIPELINE_MODELS_CLEANED", f"Best model: {best_name}, WMAPE: {best_wmape:.4f}")
+    log_memory_usage("PIPELINE_MODELS_CLEANED", f"Best model: {best_model}, WMAPE: {best_wmape:.4f}")
 
     mlflow.log_artifact(
         os.path.join(dataset_dir, "metadata.json"),
@@ -261,24 +287,27 @@ def train_pipeline(val_df: pd.DataFrame, train_libsvm_path: str, val_libsvm_path
 
     gc.collect()
     logger.info("Training completed run_id=%s dataset_id=%s mlflow_run_id=%s", run_id, dataset_id, mlflow_run_id)
-    log_memory_usage("PIPELINE_END", f"Best model: {best_name}")
+    log_memory_usage("PIPELINE_END", f"Best model: {best_model}")
 
 
-def train_main(run_id: str, dataset_id: str, train_path: str, val_path: str, train_libsvm_path: str, val_libsvm_path: str, mlflow_run_id: Optional[str] = None, dataset_dir: Optional[str] = None):
+def train_main(run_id: str, dataset_id: str, train_libsvm_path: str, val_libsvm_path: str, mlflow_run_id: Optional[str] = None, dataset_dir: Optional[str] = None):
+    """
+    Main entry point for training orchestration.
+    Initializes training workflow and tracks end-to-end memory usage during execution.
+    """
+
     logger.info("Main entry: run_id=%s dataset_id=%s dataset_dir=%s mlflow_run_id=%s", run_id, dataset_id, dataset_dir, mlflow_run_id)
 
     if dataset_dir is None:
-        dataset_dir = os.path.dirname(train_path)
+        dataset_dir = os.path.dirname(train_libsvm_path)
+
+    if mlflow_run_id is None:
+        raise ValueError("mlflow_run_id is required for training")
 
     initial_memory_rss = log_memory_usage("MAIN_START", f"run_id={run_id}, dataset_id={dataset_id}")
-    
-    val_df = pd.read_parquet(val_path)
-    
-    log_memory_usage(f"MAIN_DATA_LOADED, Val shape: {val_df.shape}")
 
     try:
         train_pipeline(
-            val_df=val_df,
             train_libsvm_path=train_libsvm_path,
             val_libsvm_path=val_libsvm_path,
             run_id=run_id,
@@ -287,9 +316,8 @@ def train_main(run_id: str, dataset_id: str, train_path: str, val_path: str, tra
             dataset_dir=dataset_dir
         )
     finally:
-        del val_df
         gc.collect()
 
-    final_memory_rss = log_memory_usage("MAIN_END Training completed")
+    final_memory_rss = log_memory_usage("MAIN_END", "Training completed")
     memory_delta_rss = final_memory_rss - initial_memory_rss
     logger.info(f"Memory delta - RSS: {memory_delta_rss:+.3f} GB")

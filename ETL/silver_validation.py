@@ -12,22 +12,15 @@ This acts as a contract boundary between transformation logic and storage.
 import pandera as pa
 from pandera import Column, Check
 
-"""
-Silver Schema:
-    Enforces:
-        - Typed, fully materialized feature table (no implicit casting downstream)
-        - Single run_date per batch (partition integrity)
-        - Unique grain: (store_id, item_id, d)
-        - Non-negative sales and prices
-        - Valid calendar attributes (bounded ranges, categorical consistency)
-
-    Design notes:
-        - strict=True prevents unexpected columns (schema drift)
-        - coerce=True ensures type normalization before validation
-        - nullable fields are explicitly controlled (no implicit null propagation)
-"""
 
 SilverSchema = pa.DataFrameSchema(
+    title = "Silver Layer Schema",
+    description =(
+        """
+        Enforces a fully materialized feature table featuring single-date partition integrity, 
+        unique grain constraints at (store_id, item_id, d), and non-negative metric bounds.
+        """
+    ),
     columns={
         "run_date": Column(pa.DateTime, nullable=False), # partition key
 

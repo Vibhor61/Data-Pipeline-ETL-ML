@@ -1,3 +1,16 @@
+"""
+ML dataset schema validation (Pandera).
+ 
+Enforces schema, grain integrity, and storage-level invariants
+before persisting ML datasets.
+ 
+Design principles:
+- Validation at preprocessing stage (before training)
+- ML-specific constraints on features and targets
+- Grain checking to prevent aggregation errors
+- Schema drift prevention
+"""
+
 import pandera as pa
 from pandera import Check
 from pandera.errors import SchemaErrors

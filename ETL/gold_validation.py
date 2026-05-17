@@ -19,26 +19,15 @@ from pandera import Column, Check
 
 VALID_EVENT_TYPES = {"Sporting", "Cultural", "National", "Religious"}
 
-"""
-Gold Storage Schema:
-    Enforces:
-        - Typed, fully materialized dataset ready for storage
-        - Single run_date and pipeline_version per batch (partition integrity)
-        - Unique grain: (item_id, store_id, d, run_date)
-        - Non-negative sales and sell_price
-        - Valid domain constraints (state_id, event_type)
-
-    Does NOT enforce:
-        - ML feature usability (null thresholds, distributions, leakage)
-        - Completeness or correctness of engineered features
-        - Statistical properties of features
-
-    Design notes:
-        - strict=True prevents unexpected columns (schema drift)
-        - coerce=True ensures type normalization before validation
-        - feature columns are allowed but validated later in ML layer
-"""
 GoldStorageSchema = pa.DataFrameSchema(
+    title="Gold Layer Storage Schema",
+    description=(
+        """
+        Validates the schema, grain, and domain boundaries of materialized forecasting profiles. 
+        Strictly enforces postgres storage invariants, while permitting downstream 
+        ML pipeline to evaluate statistical distributions and feature usability metrics independently.
+        """
+    ),
     columns={
         # Identifiers
         "item_id": Column(pa.String, nullable=False),

@@ -1,21 +1,15 @@
 """
 Silver Layer - ETL Pipeline
+
 Builds validated dataset by joining Bronze data(sales) with dimnesion tables(sell prices and calendar) 
 
 Input: Bronze partition (filtered by run_date)
 Output: Fully materialized Silver partition (same run_date as bronze)
 
 Core design principles:
-- run_date is the source of truth for all data slicing
-- ingestion is partition-based (DELETE + INSERT per run_date) with no incemental logic
-- strict schema validation before commit
-
-Invariants:
-- exactly one Silver partition exists per run_date
-- unique grain: (store_id, item_id, d)
-- schema is strictly enforced (no extra/missing columns)
-- all partitions are reproducible via deterministic recomputation
-- downstream layers can assume schema correctness and grain stability
+- Ingestion Scope: Partition-isolated via a strict atomic DELETE + INSERT strategy.
+- Deterministic Recomputation: Idempotent processing anchored strictly to `run_date`.
+- Quality Boundary: Strict schema and grain validation executed before the transaction commit.
 """
 
 import logging
@@ -49,22 +43,12 @@ def validate_table_name(table_name: str) -> sql.Identifier:
 def build_silver_partition(conn, run_date: str) -> int:
     """
     Builds and validates Silver partition for a given run_date.
-    Args:
-        conn: active PostgreSQL connection
-        run_date (str): execution date in YYYY-MM-DD format
-    Returns:
-        int: number of rows inserted into Silver partition
+    The execution guarantees:
+    1. Idempotency: Clears pre-existing data for the target run_date partition.
+    2. Enrichment: Merges daily sales with temporal context (Inner Join) and pricing structures (Left Join).
+    3. Structural Verification: Performs in-database group checks to defend the (store_id, item_id, d) primary grain.
+    4. Type Contract: Passes the final materialized dataframe through Pandera schema evaluation.
 
-    Process:
-        - Deletes existing partition for run_date (idempotent overwrite)
-        - Extracts Bronze data filtered by run_date
-        - Joins with calendar (inner join on d) for temporal features
-        - Joins with sell_prices (left join on store_id, item_id, wm_yr_wk)
-        - Inserts fully materialized rows into Silver table
-        - Validates inserted data using SilverSchema(Pandera based)
-
-    Raises:
-        ValueError: if partition is empty or validation fails
     """
     bronze_ident = validate_table_name(BRONZE_TABLE)
     silver_ident = validate_table_name(SILVER_TABLE)
@@ -203,16 +187,9 @@ def build_silver_partition(conn, run_date: str) -> int:
 def run_silver(run_date: str) -> int:
     """
     Executes Silver ETL pipeline for a given run_date.
-    Args:
-        run_date (str): execution date in YYYY-MM-DD format
-    Returns:
-        int: number of rows inserted into Silver table
-
-    Process:
-        - Establishes database connection
-        - Builds Silver partition
-        - Commits transaction on success
-        - Rolls back on failure
+    Establishes the connection session and guarantees an atomic fallback 
+    (rollback) to protect downstream services if compilation dependencies, 
+    grain invariants, or Pandera assertions fail.
     """
     conn = get_connection()
     try:

@@ -1,3 +1,19 @@
+"""
+Data Loader - ML Pipeline
+ 
+This module implements dataset construction for the ML pipeline by 
+fetching validated ETL run metadata and streaming gold layer data using
+cursor based approach.
+
+Input: Gold layer table (from ETL pipeline)
+Output: Serialized dataset splits (Parquet + LibSVM) with metadata
+ 
+Core design principles:
+- Cursor-based streaming to manage memory for large datasets
+- Deterministic time-based train/val/test splits (70/15/15)
+- Maintains dataset lineage via content hashing
+- Categorical encoder fitted on training data, applied to all splits 
+"""
 from collections import defaultdict
 import logging
 import shutil
@@ -22,7 +38,7 @@ logger = logging.getLogger(__name__)
 BASE_DATE = pd.to_datetime("2011-01-29")
 TARGET_COL = "sales"
 
-CURSOR_BATCH_SIZE = 10_000
+CURSOR_BATCH_SIZE = 500_000
 
 def get_memory_usage_mb() -> float:
     process = psutil.Process(os.getpid())
@@ -46,6 +62,9 @@ class DataLoader:
 
 
 def fetch_etl_run(conn, run_id:str) -> pd.Series:
+    """
+    Fetch and validate ETL run record. Raises ValueError if run not found or failed.
+    """
     query = """
         SELECT * FROM etl_pipeline_runs
         WHERE run_id = %s
@@ -103,7 +122,12 @@ def finalize_tmp_files(tmp_paths: Dict[str, str], final_paths: Dict[str, str]):
 
 
 def build_encoder(conn, cfg: DataLoader, start_date, train_end_date):
+    """
+    Fit categorical encoders on training data split.
 
+    Strategy: Stream categorical columns from gold table, build vocabulary, map to ordinal integers.
+    Unknown values mapped to '__UNK__' token.
+    """
     logger.info(f"Fitting encoder for {start_date} to {train_end_date}")
     
     vocab = defaultdict(set)
@@ -158,6 +182,12 @@ def build_encoder(conn, cfg: DataLoader, start_date, train_end_date):
 
 
 def load_gold_dataset(conn, cfg: DataLoader, start_date, end_date, train_end, val_end, tmp_paths, libsvm_paths, encoders ):
+    """
+    Stream gold table data, apply transformations, and serialize to Parquet + LibSVM.
+    
+    Strategy: Cursor-based batch loading with on-the-fly partitioning and encoding.
+    Features and Schema are 
+    """
     columns = ALL_COLS
     query = f"""
         SELECT {', '.join(ALL_COLS)}
@@ -268,7 +298,17 @@ def load_gold_dataset(conn, cfg: DataLoader, start_date, end_date, train_end, va
 
 
 def build_dataset_cfg(cfg: DataLoader) -> Tuple[Dict[str, str], Dict[str, str], Dict[str, Any]]:
+    """
+    Build complete dataset with lineage tracking with atomicity to fallback if failure at any step
     
+    Process:
+    1. Validate ETL run exists and succeeded
+    2. Fit categorical encoder on training data
+    3. Stream gold table and serialize splits
+    4. Compute content hashes for lineage
+    5. Generate metadata artifact
+    6. Finalize directory structure with atomic rename
+    """
     try:
         with get_connection() as conn:
 
@@ -386,6 +426,7 @@ def build_dataset_cfg(cfg: DataLoader) -> Tuple[Dict[str, str], Dict[str, str], 
                 "feature_hash": feature_hash,
                 "feature_version": cfg.feature_version,
                 "source_table": cfg.table_name,
+                "dataset_dir": final_dataset_dir,
                 "artifacts": {
                     "encoder": os.path.basename(encoder_path),
                     "features": os.path.basename(features_path),
@@ -396,20 +437,20 @@ def build_dataset_cfg(cfg: DataLoader) -> Tuple[Dict[str, str], Dict[str, str], 
             with open(metadata_path, "w") as f:
                 json.dump(metadata, f, indent=2)
             
-            finalize_tmp_files(parquet_tmp_paths, parquet_paths)
-            finalize_tmp_files(libsvm_tmp_paths, libsvm_paths)
             if os.path.exists(final_dataset_dir):
                 shutil.rmtree(final_dataset_dir)
 
+            finalize_tmp_files(parquet_tmp_paths, parquet_paths)
+            finalize_tmp_files(libsvm_tmp_paths, libsvm_paths)
+            
             os.rename(build_dir, final_dataset_dir)
 
             logger.info("Dataset built: %s", dataset_id)
 
-            return final_parquet_paths, final_libsvm_paths, metadata
+            return metadata
         
     except Exception as e:
         logger.error(f"Error building dataset: {e}")
         if build_dir and os.path.exists(build_dir):
             shutil.rmtree(build_dir, ignore_errors=True)
         raise
-    
