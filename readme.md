@@ -1,8 +1,20 @@
 # Data-Pipeline-ETL-ML
 
-A production-grade **Airflow-based ETL + ML pipeline** for retail demand forecasting using the M5 dataset. Implements medallion architecture (Bronze/Silver/Gold) for data layering and multi-stage ML orchestration with PostgreSQL metadata tracking and MLflow experiment management.
+A production-grade **Airflow-based ETL + ML pipeline** for retail demand forecasting using the M5 dataset. Implements medallion architecture (Bronze/Silver/Gold), metadata-driven ML orchestration, reproducible dataset versioning, and MLflow-based experiment tracking.
 
-**Focus:** End-to-end ML pipeline with full lineage from raw CSV → cleaned dataset → train/validation/test splits → model training → batch predictions → evaluation metrics.
+Built to simulate a production-style batch ML platform focused on orchestration, lineage, reproducibility, and operational reliability rather than notebook-centric experimentation.
+
+**Focus:** End-to-end ML lineage from raw CSV ingestion → warehouse transformations → dataset generation → model training → batch prediction → evaluation.
+
+---
+## System Guarantees
+
+- Idempotent and reproducible partition-based pipeline execution
+- Deterministic train/validation/test dataset generation
+- End-to-end metadata lineage across datasets, models, predictions, and evaluations
+- Execution-date scoped reproducibility for ETL and ML workflows
+- Validation-driven data quality enforcement using Pandera
+- Experiment and artifact tracking through MLflow
 
 ---
 
@@ -12,24 +24,47 @@ A production-grade **Airflow-based ETL + ML pipeline** for retail demand forecas
 
 ---
 
+## Results 
+
+### Pipeline Scale
+
+| Metric | Value |
+|---|---|
+| Raw Rows Processed | 11M+ |
+| ML Dataset Rows Generated | 11.1M+ |
+| Prediction Rows Generated | 1.67M+ |
+| Forecasting Models | XGBoost, LightGBM |
+| Storage Formats | Parquet, LibSVM |
+
+### Forecasting Performance
+
+| Metric | Model | Baseline |
+|---|---|---|
+| RMSE | 2.01 | 2.81 |
+| MAE | 0.67 | 0.86 |
+| WMAPE | 0.648 | 0.828 |
+| R² Score | 0.759 | — |
+
+The forecasting pipeline consistently achieved a **20.0% WMAPE improvement** over the lag-based baseline forecasting strategy.
+
+![MLflow_UI](images/mlflow.png)
+
+![MLflow_logging](images/mlflow_logging.png)
+
+---
+
 ## Tech Stack
 
-| Component | Technology | Purpose |
-|-----------|-----------|---------|
-| **Orchestration** | Apache Airflow | DAG scheduling and task orchestration |
-| **Metadata & State** | PostgreSQL | All-data-in-database approach: ETL runs, ML stages, dataset metadata, feature stores |
-| **ETL Processing** | SQL (PostgreSQL Window Functions, CTEs, Joins) | Bronze → Silver → Gold transformations with Pandera validation |
-| **Schema Validation** | Pandera | Runtime schema and grain validation for ETL outputs and ML usability |
-| **Data Formats** | Parquet, LibSVM | Columnar storage (Parquet) for auditing and model-agnostic libsvm for ML training |
-| **ML Training** | XGBoost, LightGBM | Gradient boosting models with early stopping |
-| **ML Pipeline** | scikit-learn | Encoding, preprocessing, metric computation |
-| **Experiment Tracking** | MLflow | Run management, artifact storage, metrics logging |
-| **Dataset Serialization** | PyArrow | Parquet I/O operations |
-| **Feature Engineering** | SQL + pandas (local) | Lag/rolling features in SQL; validation in pandas |
-| **Memory Management** | psutil, joblib, gc | Memory profiling, encoder persistence, garbage collection |
-| **Containerization** | Docker + Docker Compose | Reproducible environment with Airflow, PostgreSQL, MLflow |
-| **Monitoring** | Airflow UI, MLflow UI | Pipeline and experiment visualization |
- 
+| Layer | Technologies |
+|---|---|
+| Orchestration | Apache Airflow |
+| Data Warehouse & Metadata | PostgreSQL |
+| ETL & Validation | SQL, Pandera |
+| ML & Feature Engineering | scikit-learn, XGBoost, LightGBM, pandas |
+| Experiment Tracking | MLflow |
+| Storage Formats | Parquet, LibSVM |
+| Infrastructure | Docker, Docker Compose |
+| Monitoring | Airflow UI, MLflow UI |
 
 ---
 
@@ -37,17 +72,22 @@ A production-grade **Airflow-based ETL + ML pipeline** for retail demand forecas
 
 This project uses the **M5 Forecasting Dataset** from the Walmart retail forecasting competition on Kaggle.
 
-The dataset contains historical daily sales data of Walmart products across multiple stores and categories in the United States. It also includes calendar events, pricing information, and product hierarchy data, making it suitable for retail demand forecasting and time-series analysis.
-
-### Dataset Files
-
-- `sales_train_validation.csv` — Historical sales data
-- `calendar.csv` — Date and event information
-- `sell_prices.csv` — Product pricing data
-
-### Dataset Source
-
 [M5 Forecasting Dataset (Kaggle)](https://www.kaggle.com/competitions/m5-forecasting-accuracy?utm_source=chatgpt.com)
+
+---
+
+## Key Features
+
+- Production-style Airflow orchestration for ETL and ML workflows
+- Medallion architecture (Bronze → Silver → Gold) using PostgreSQL
+- Idempotent and reproducible partition-based pipeline execution
+- SQL-first warehouse transformations with validation-driven data quality checks
+- Deterministic train/validation/test dataset generation and snapshot versioning
+- Feature engineering with lag, rolling-window, temporal, and categorical features
+- XGBoost and LightGBM forecasting with MLflow experiment tracking
+- Batch prediction and evaluation using RMSE, MAE, WMAPE, and R² metrics
+- End-to-end metadata lineage across datasets, models, predictions, and evaluations
+- Dockerized infrastructure with centralized tracking, logging, and monitoring
 
 ---
 
@@ -55,248 +95,79 @@ The dataset contains historical daily sales data of Walmart products across mult
 
 ```
 Data-Pipeline-ETL-ML/
-│
-├── dags/                              # Airflow DAGs for orchestration
-│   ├── etl_dag.py                     # Bronze → Silver → Gold ETL pipeline
-│   └── ml_dag.py                      # Dataset → Train → Predict → Evaluate ML pipeline
-│
-├── ETL/                               # ETL (Extract-Transform-Load) pipeline
-│   ├── bronze.py                      # Raw data ingestion (CSV → PostgreSQL)
-│   ├── silver.py                      # Data cleaning & transformation
-│   ├── gold.py                        # Business-ready aggregation (features, aggregations)
-│   ├── silver_validation.py           # Silver layer schema validation (Pandera)
-│   └── gold_validation.py             # Gold layer schema validation (Pandera)
-│
-├── ML/                                # Machine Learning pipeline
-│   ├── data_loader.py                 # Dataset building (train/val/test splits)
-│   ├── train.py                       # Model training (XGBoost/LightGBM with early stopping)
-│   ├── predict.py                     # Batch prediction on test set
-│   ├── evaluate.py                    # Evaluation metrics (RMSE, MAE, WMAPE, R²)
-│   ├── preprocess.py                  # Feature engineering & categorical encoding
-│   └── validate.py                    # Dataset integrity validation (grain checks, NaN)
-│
-├── utils/                             # Utility modules
-│   ├── db.py                          # PostgreSQL connection management
-│   ├── etl_helpers.py                 # ETL metadata lifecycle (create_or_get_run, start_stage, finish_stage)
-│   └── ml_helpers.py                  # ML metadata lifecycle tracking
-│
-├── schema/                            # Database schema & initialization
-│   ├── init.sql                       # Database and tables initialization
-│   ├── bronze.sql                     # Bronze layer schema (raw data table)
-│   ├── silver.sql                     # Silver layer schema (cleaned data table)
-│   ├── gold.sql                       # Gold layer schema (features table)
-│   ├── etl_metadata.sql               # ETL run and step tracking tables
-│   └── ml_metadata.sql                # ML pipeline and stage tracking tables
-│
-├── requirements/                      
-│   ├── airflow.txt                    # Airflow + core ML dependencies 
-│   └── mlflow.txt                     # MLflow server dependencies
-│
-├── docker/                            # Docker configuration
-│
-├── docker-compose.yml                 # Full stack orchestration
-│                                     
-├── .env                               # Environment variables (template)
-|
-├── .gitignore                         # Git ignore patterns
-│
-└── readme.md                          # Project documentation & quickstart guide
+├── dags/          # Airflow DAG orchestration
+├── ETL/           # Bronze → Silver → Gold ETL pipeline
+├── ML/            # Training, prediction, evaluation pipeline
+├── utils/         # Shared helpers and metadata lifecycle utilities
+├── schema/        # Warehouse and metadata schemas
+├── requirements/  # Dependency management
+├── docker/        # Container configuration
+├── docker-compose.yml
+└── README.md
 ```
-
 ---
 
-## Key Features
-
-### ETL Architecture
-- Medallion architecture (Bronze → Silver → Gold)
-- SQL-first transformations using PostgreSQL window functions, joins, and CTEs
-- Run-date partition isolation for deterministic and reproducible execution
-- Pandera-based schema and grain validation
-- Idempotent re-runs using `ON CONFLICT DO UPDATE`
-
-### ML Pipeline
-- Streaming dataset construction from Gold layer using cursor-based loading
-- Deterministic train, validation and test dataset generation
-- Dataset snapshotting to Parquet for reproducibility, lineage tracking, and downstream reuse
-- Additional LibSVM serialization for efficient XGBoost and LightGBM training
-- Idempotent ML stages with metadata-backed re-runs and deterministic dataset versioning
-- Feature engineering:
-  - lag features
-  - rolling statistics
-  - temporal features
-  - categorical encoding
-- XGBoost and LightGBM training with validation-based early stopping
-- Batch prediction and evaluation with RMSE, MAE, WMAPE, and R² metrics
-- Baseline comparison against lag-based forecasting
-
-### Metadata, Lineage & Orchestration
-- PostgreSQL-backed metadata architecture for ETL and ML lifecycle tracking
-- Full lineage tracking across runs, datasets, models, predictions, and evaluations
-- Nested MLflow runs for experiment management and artifact tracking
-- Dataset lineage validation across train → predict → evaluate stages
-
-### Reliability & Infrastructure
-- Dockerized deployment using Airflow, PostgreSQL, and MLflow
-- Memory profiling and explicit garbage collection for large workloads
-- Step-level failure tracking and centralized logging
-- SQL whitelist validation and safe dynamic query construction
-- Monitoring through Airflow UI and MLflow UI
-
----
-## Metadata Architecture
-
-The project uses PostgreSQL as the central metadata and storage layer for ETL orchestration, ML workflow tracking, dataset lineage, and experiment management.
-
-### Core Databases
-
-| Database | Purpose |
-|----------|---------|
-| `retail_dw` | Main analytical warehouse for ETL + ML pipelines |
-| `airflow_db` | Metadata backend for Apache Airflow |
-| `mlflow_db` | Tracking backend for MLflow experiments and runs |
-
-### Warehouse Tables (`retail_dw`)
-
-| Table | Purpose |
-|-------|---------|
-| `bronze_sales` | Raw ingested sales data |
-| `calendar` | Calendar and event reference data |
-| `sell_prices` | Historical product pricing data |
-| `silver_table` | Cleaned and validated intermediate layer |
-| `gold_table` | Business-ready feature layer for ML |
-| `etl_pipeline_runs` | Tracks ETL DAG executions |
-| `etl_pipeline_steps` | Stores ETL stage-level metrics and status |
-| `ml_pipeline_runs` | Tracks ML workflow executions |
-| `ml_runs` | Stores train/predict/evaluate stage metadata |
-| `ml_dataset` | Maintains dataset lineage, schema hashes, and feature versions |
-
----
-
-## ETL Pipeline (etl_dag.py)
+## ETL Pipeline (`etl_dag.py`)
 
 ### DAG Flow
-```
+
+```text
 init_run → bronze → silver → gold → finalize_pipeline
 ```
 
-### Task Descriptions
-
-| Task | Responsibility | Input | Output |
-|------|-----------------|-------|--------|
-| `init_run` | Create/reset pipeline run metadata, push run_id to XCom | dag_run.conf, run_date | run_id |
-| `bronze` | Load raw CSV files (sales, calendar, sell_prices) | CSV paths | bronze_sales table |
-| `silver` | Clean, validate, transform bronze data | bronze_sales | silver_table |
-| `gold` | Aggregate and prepare business-ready dataset | silver_table | gold_table |
-| `finalize_pipeline` | Evaluate all step states, mark run success/failed | step results | pipeline status |
+The ETL workflow ingests raw M5 datasets into PostgreSQL, performs Bronze → Silver → Gold transformations, validates schema integrity using Pandera, and generates business-ready feature tables for downstream ML workloads.
 
 ![ETL_Dag_Grid-View](images/etl_dag.png)
 
 ---
 
-## ML Pipeline (ml_dag.py)
+## ML Pipeline (`ml_dag.py`)
 
 ### DAG Flow
-```
+
+```text
 create_run → build_dataset → train → predict → evaluate → finalize
 ```
 
-### Task Descriptions
-
-| Task | Responsibility | Input | Output |
-|------|-----------------|-------|--------|
-| `create_run` | Fetch ETL run_id, create ML pipeline run, start MLflow parent run | run_date | run_id, parent_mlflow_run_id |
-| `build_dataset` | Load gold table, build train/val/test splits, write parquet & libsvm | gold_table | dataset_id, split paths |
-| `train` | Train model on train/val splits, log artifacts to MLflow | split paths | train_mlflow_run_id |
-| `predict` | Generate predictions on test set | test_path, train_mlflow_run_id | pred_path, pred_mlflow_run_id |
-| `evaluate` | Compute metrics, log results to MLflow | pred_path | evaluation summary |
-| `finalize` | Mark ML pipeline run as success | evaluation results | pipeline status |
+The ML workflow builds deterministic train/validation/test datasets, performs gradient boosting model training, generates batch predictions, evaluates forecasting performance, and tracks experiments and artifacts through MLflow.
 
 ![ML_dag_Grid-View](images/ml_dag.png)
 
 ---
 
+## Metadata & Lineage Tracking
+
+The pipeline maintains end-to-end lineage across ETL runs, dataset generation, ML stages, and MLflow experiment tracking using PostgreSQL-backed metadata tables.
+
+![Lineage_Tracking](images/lineage_tracking.png)
+
+---
+
 ## Configuration
 
-### Environment Variables
+Environment variables are managed through `.env` and Docker Compose configuration.
 
-```bash
-# PostgreSQL
-PG_USER=airflow
-PG_PASSWORD=airflow
-PG_DB=retail_dw
+Core services include:
+- PostgreSQL
+- Apache Airflow
+- MLflow
 
-# Airflow Metadata DB
-AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@postgres:5432/airflow_db
-
-# MLflow
-MLFLOW_TRACKING_URI=http://mlflow:5000
-MLFLOW_BACKEND_STORE_URI=postgresql://airflow:airflow@postgres:5432/mlflow_db
-
-# ETL Tables
-BRONZE_TABLE=bronze_sales
-SILVER_TABLE=silver_table
-GOLD_TABLE=gold_table
-
-# Data Paths
-DATA_DIR=/opt/airflow/data
-DATASETS_DIR=/opt/airflow/data/datasets
-```
+Dataset and warehouse paths can be configured through environment variables inside the containerized deployment setup.
 
 ## Running the Pipeline
 
 ### Prerequisites
 - Docker & Docker Compose
-- PostgreSQL (or use docker-compose version)
 - Python 3.9+
-- Place the M5 data files inside the `data/` directory
+- M5 dataset files inside `data/`
 
 ### Quick Start
 
-1. **Clone the repository**
-   ```bash
-   git clone https://github.com/Vibhor61/Data-Pipeline-ETL-ML.git
-   cd Data-Pipeline-ETL-ML
-   ```
-
-2. **Build and start containers**
-   ```bash
-   docker-compose up -d
-   ```
-
-3. **Access Airflow UI**
-   - Navigate to `http://localhost:8080`
-   - Default credentials: airflow / airflow
-
-4. **Trigger ETL DAG**
-   - In Airflow UI, enable `retail_etl_dag`
-   - Click "Trigger DAG" or schedule via cron
-   - Monitor task execution and logs
-
-5. **Trigger ML DAG** (after ETL completion)
-   - Enable `retail_ml_dag`
-   - Trigger DAG (reads gold table from completed ETL run)
-   - Monitor MLflow experiments at `http://localhost:5000`
-
-
-Historical data ranges from `2011-01-29` to `2016-04-24`.
-
-### Access Airflow Container
-
 ```bash
-docker exec -it airflow_scheduler bash
-```
+git clone https://github.com/Vibhor61/Data-Pipeline-ETL-ML.git
+cd Data-Pipeline-ETL-ML
 
-### Trigger ETL Pipeline
-```bash
-airflow dags trigger retail_etl_dag \
-  --exec-date 2011-01-29
-```
-During intial bootstrap, the Bronze layer ingests calendar.csv and sell_prices.csv which should be configured directly inside Airflow DAG
-
-# Trigger ML Pipeline
-```bash
-airflow dags trigger retail_ml_dag \
-  --exec-date 2012-01-29
+docker-compose up -d
 ```
 
 ### Access Services
@@ -306,9 +177,36 @@ airflow dags trigger retail_ml_dag \
 | Airflow UI | http://localhost:8080 |
 | MLflow UI | http://localhost:5000 |
 
-Default Airflow credentials: airflow/airflow
+Default Airflow credentials:
 
-![MLflow_UI](images/mlflow.png)
+```text
+airflow / airflow
+```
+
+### Trigger Pipelines
+
+Access Airflow Container:
+
+```bash
+docker exec -it airflow_scheduler bash
+```
+
+ETL Pipeline:
+
+```bash
+airflow dags trigger retail_etl_dag --exec-date 2011-01-29
+```
+
+ML Pipeline:
+
+```bash
+airflow dags trigger retail_ml_dag --exec-date 2012-01-29
+```
+
+### Notes
+- Historical data ranges from `2011-01-29` to `2016-04-24`
+- During initial bootstrap, `calendar.csv` and `sell_prices.csv` are ingested through the Bronze layer
+- ML DAG execution depends on a completed ETL run for the same execution date
 ---
 
 ## Future work and improvements
