@@ -49,8 +49,6 @@ The forecasting pipeline consistently achieved a **20.0% WMAPE improvement** ove
 
 ![MLflow_UI](images/mlflow.png)
 
-![MLflow_logging](images/mlflow_logging.png)
-
 ---
 
 ## Tech Stack
@@ -129,16 +127,7 @@ The ETL workflow ingests raw M5 datasets into PostgreSQL, performs Bronze → Si
 create_run → build_dataset → train → predict → evaluate → finalize
 ```
 
-### Task Descriptions
-
-| Task | Responsibility | Input | Output |
-|------|-----------------|-------|--------|
-| `create_run` | Fetch ETL run_id, create ML pipeline run, start MLflow parent run | run_date | run_id, parent_mlflow_run_id |
-| `build_dataset` | Load gold table, build train/val/test splits, write parquet & libsvm | gold_table | dataset_id, split paths |
-| `train` | Train model on train/val splits, log artifacts to MLflow | split paths | train_mlflow_run_id |
-| `predict` | Generate predictions on test set | test_path, train_mlflow_run_id | pred_path, pred_mlflow_run_id |
-| `evaluate` | Compute metrics, log results to MLflow | pred_path | evaluation summary |
-| `finalize` | Mark ML pipeline run as success | evaluation results | pipeline status |
+The ML workflow builds deterministic train/validation/test datasets, performs gradient boosting model training, generates batch predictions, evaluates forecasting performance, and tracks experiments and artifacts through MLflow.
 
 ![ML_dag_Grid-View](images/ml_dag.png)
 
@@ -151,17 +140,6 @@ The pipeline maintains end-to-end lineage across ETL runs, dataset generation, M
 ![Lineage_Tracking](images/lineage_tracking.png)
 
 ---
-
-## Configuration
-
-Environment variables are managed through `.env` and Docker Compose configuration.
-
-Core services include:
-- PostgreSQL
-- Apache Airflow
-- MLflow
-
-Dataset and warehouse paths can be configured through environment variables inside the containerized deployment setup.
 
 ## Running the Pipeline
 
